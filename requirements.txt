@@ -9,3 +9,6 @@ tqdm==4.66.4
 wandb==0.17.0
 ipdb
 numpy==1.26.0
+pandas
+pyarrow
+imageio[ffmpeg]

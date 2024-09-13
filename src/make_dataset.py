@@ -17,7 +17,7 @@ def create_train_dataset(cfg: DictConfig, output_dir: Path, name) -> Dataset:
     agent = Agent(instantiate(cfg.agent, num_actions=env.num_actions)).to(device)
     
     # Create the dataset
-    dataset = Dataset(output_dir, name=name, save_on_disk=True)
+    dataset = Dataset(output_dir, name=name, save_on_disk=True, use_manager=False)
 
     # Create the collector
     collector = make_collector(

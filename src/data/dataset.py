@@ -139,5 +139,5 @@ class Dataset(StateDictMixin, torch.utils.data.Dataset):
         torch.save(self.state_dict(), self._default_path)
 
     def load_from_default_path(self) -> None:
-        if self._default_path.is_file():
-            self.load_state_dict(torch.load(self._default_path))
+        assert self._default_path.is_file(), f"File {self._default_path} does not exist"
+        self.load_state_dict(torch.load(self._default_path))
