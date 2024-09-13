@@ -50,15 +50,15 @@ collection:
 
 training:
   should: True
-  num_final_epochs: 50
+  num_final_epochs: 1
   cache_in_ram: True
   num_workers_data_loaders: 0
   model_free: False # if True, turn off world_model training and RL in imagination
-  compile_wm: True
+  compile_wm: False
 
 evaluation:
   should: True
-  every: 10
+  every: 1
 
 world_model_env:
   _target_: envs.WorldModelEnvConfig

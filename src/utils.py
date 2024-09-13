@@ -306,3 +306,4 @@ def try_until_no_except(func: Callable) -> None:
 def wandb_log(logs: Logs, epoch: int):
     for d in logs:
         wandb.log({"epoch": epoch, **d})
+        print(f"Epoch {epoch}: {d}")
