@@ -1,2 +1,5 @@
 docker run -it --gpus all -v /mnt/raid:/mnt/raid -v "$(pwd)":/workspace pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime bash
 apt-get update && apt-get install ffmpeg libsm6 libxext6  -y && pip install -r requirements.txt
+
+python src/make_dataset.py
+python src/main.py env.train.id=BreakoutNoFrameskip-v4 common.device=cuda:0 collection.path_to_static_dataset=/workspace/make_dataset_output
