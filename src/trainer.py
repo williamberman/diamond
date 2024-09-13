@@ -337,7 +337,9 @@ class Trainer(StateDictMixin):
 
         num_steps = cfg.grad_acc_steps * steps
 
-        for i in trange(num_steps, desc=f"Training {name}"):
+        pbar = trange(num_steps, desc=f"Training {name}")
+
+        for i in pbar:
             batch = next(data_iterator).to(self._device) if data_iterator is not None else None
             loss, metrics = model.compute_loss(batch) if batch is not None else model.compute_loss()
             loss.backward()
@@ -357,6 +359,9 @@ class Trainer(StateDictMixin):
                 if lr_sched is not None:
                     metrics["lr"] = lr_sched.get_last_lr()[0]
                     lr_sched.step()
+
+            pbar.update(1)
+            pbar.set_postfix(loss=loss.item())
 
             to_log.append(metrics)
 
