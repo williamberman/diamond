@@ -13,13 +13,16 @@ import argparse
 import os
 import hashlib
 
+# python save_trajectories.py --save_dir /mnt/raid/orca_rl/trajectory_samples_2 --num_steps 12800000 --gpu 0
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Space Invaders Simulator with Multiple Trajectory Parquet Output")
     parser.add_argument("--gpu", type=int, default=0, help="GPU index")
-    parser.add_argument("--policy", type=str, default='/mnt/raid/orca_rl/ppo_space_invaders/ppo_atari_multigpu_300000.pt', help="Path to the policy file")
+    parser.add_argument("--policy_dir", type=str, default='/mnt/raid/orca_rl/ppo_space_invaders/', help="Path to the policy file")
     parser.add_argument("--epsilon", type=float, default=0, help="Epsilon for random action selection")
     parser.add_argument("--save_dir", type=str, default='/mnt/raid/orca_rl/trajectory_samples/', help="Directory to save parquet files")
-    parser.add_argument("--num_trajectories", type=int, default=20, help="Number of trajectories to generate and save")
+    parser.add_argument("--num_trajectories", type=int, default=None, help="Number of trajectories to generate and save", required=False)
+    parser.add_argument("--num_steps", type=int, default=None, help="Number of steps to generate and save", required=False)
     return parser.parse_args()
 
 def generate_random_hash(length=8):
@@ -31,22 +34,31 @@ def state_to_bytes(state):
     pil_image.save(img_byte_arr, format='PNG')
     return img_byte_arr.getvalue()
 
+def load_random_agent():
+    policy = random.choice([x for x in os.listdir(args.policy_dir) if x.endswith('.pt')])
+    policy_path = os.path.join(args.policy_dir, policy)
+    print(f"Loading policy: {policy_path}")
+    agent = Agent()
+    agent.load_state_dict(torch.load(policy_path, map_location=device))
+    agent.to(device)
+
+    return agent, policy_path
+
 @torch.no_grad()
 def simulator_dataset(args):
-    device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
-    
-    agent = Agent()
-    agent.load_state_dict(torch.load(args.policy, map_location=device))
-    agent.to(device)
+    agent, policy = load_random_agent()
 
     env = make_env()
 
-    for trajectory_num in range(args.num_trajectories):
+    trajectory_num = 0
+    step_num = 0
+
+    while True:
         state, _ = env.reset()
         trajectory_data = []
-        trajectory_name = generate_random_hash()
+        reset_ctr = 0
 
-        while True:
+        while reset_ctr < 3:
             if random.random() < args.epsilon:
                 action = env.action_space.sample()
             else:
@@ -59,9 +71,11 @@ def simulator_dataset(args):
                 action = action.item()
 
             next_state, reward, terminated, truncated, _ = env.step(action)
+            if terminated or truncated:
+                reward = -1
 
             trajectory_data.append({
-                "policy": args.policy,
+                "policy": policy,
                 "epsilon": args.epsilon,
                 "reward_this_period": reward,
                 "state": state_to_bytes(state[-1]),
@@ -70,14 +84,28 @@ def simulator_dataset(args):
             })
 
             if terminated or truncated:
-                # Save trajectory to parquet file using pandas
-                df = pd.DataFrame(trajectory_data)
-                output_path = os.path.join(args.save_dir, f"{trajectory_name}.parquet")
-                df.to_parquet(output_path)
-                print(f"Trajectory {trajectory_num + 1}/{args.num_trajectories} saved to {output_path}")
-                break  # Exit the loop after saving one trajectory
+                state, _ = env.reset()
+                reset_ctr += 1
 
-            state = next_state
+            else:
+                state = next_state
+
+        trajectory_num += 1
+        step_num += len(trajectory_data)
+
+        if trajectory_num % 100 == 0:
+            agent, policy = load_random_agent()
+
+        pd.DataFrame(trajectory_data).to_parquet(os.path.join(args.save_dir, f"{generate_random_hash()}.parquet"))
+        print(f"Trajectory saved to {args.save_dir}")
+
+        print(f"{trajectory_num} trajectories, {step_num} steps")
+
+        if args.num_trajectories is not None and trajectory_num >= args.num_trajectories:
+            break
+
+        if args.num_steps is not None and step_num >= args.num_steps:
+            break
 
 def make_env():
     env_id = "ALE/SpaceInvaders-v5"
@@ -127,5 +155,6 @@ class Agent(nn.Module):
 
 if __name__ == "__main__":
     args = parse_args()
+    device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.save_dir, exist_ok=True)
     simulator_dataset(args)

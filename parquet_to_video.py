@@ -27,8 +27,10 @@ def process_parquet_files(directory):
             print(f"Converted {filename} to video: {video_path}")
 
 # Specify the directory containing the parquet files
-parquet_directory = '.'
+parquet_directory = '/mnt/raid/orca_rl/trajectory_samples_2/264b611e.parquet'
+
+convert_parquet_to_video(parquet_directory, 'output.mp4')
 
 # Process all parquet files in the directory
-process_parquet_files(parquet_directory)
+# process_parquet_files(parquet_directory)
 
