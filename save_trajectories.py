@@ -12,6 +12,7 @@ from PIL import Image
 import argparse
 import os
 import hashlib
+import pyarrow.parquet as pq
 
 # python save_trajectories.py --save_dir /mnt/raid/orca_rl/trajectory_samples_2 --num_steps 12800000 --gpu 0
 
@@ -153,8 +154,27 @@ class Agent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
-if __name__ == "__main__":
+def main():
     args = parse_args()
     device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.save_dir, exist_ok=True)
     simulator_dataset(args)
+
+def check_n_in_dir():
+    dir = "/mnt/raid/orca_rl/trajectory_samples"
+    dir = "/mnt/raid/orca_rl/trajectory_samples_2"
+    files = [os.path.join(dir, x) for x in os.listdir(dir) if x.endswith('.parquet')]
+
+    print(f"Num trajectories: {len(files)}")
+
+    tot_rows = 0
+
+    for file in files:
+        parquet_file = pq.ParquetFile(file)
+        tot_rows += parquet_file.metadata.num_rows
+
+    print(f"Num rows: {tot_rows}")
+
+if __name__ == "__main__":
+    main()
+    # check_n_in_dir()
