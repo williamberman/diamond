@@ -42,8 +42,11 @@ def convert_parquet_to_episode(parquet_file):
     return episode
 
 def process_trajectory_samples():
-    trajectory_dir = '/mnt/raid/orca_rl/trajectory_samples'
-    write_dir = '/mnt/raid/orca_rl/trajectory_samples_diamond_format'
+    # trajectory_dir = '/mnt/raid/orca_rl/trajectory_samples'
+    # write_dir = '/mnt/raid/orca_rl/trajectory_samples_diamond_format'
+
+    trajectory_dir = '/mnt/raid/orca_rl/trajectory_samples_2'
+    write_dir = '/mnt/raid/orca_rl/trajectory_samples_diamond_format_2'
 
     os.system(f"rm -rf {write_dir}")
 
@@ -62,12 +65,25 @@ def process_trajectory_samples():
 
         try:
             lock.acquire()
-            dataset.add_episode(episode)
-            pbar.update(1)
+
+            dataset.assert_not_static()
+            episode = episode.to("cpu")
+
+            episode_id = dataset.num_episodes
+            dataset.start_idx = np.concatenate((dataset.start_idx, np.array([dataset.num_steps])))
+            dataset.lengths = np.concatenate((dataset.lengths, np.array([len(episode)])))
+            dataset.num_steps += len(episode)
+            dataset.num_episodes += 1
+
+            dataset.counter_rew.update(episode.rew.sign().tolist())
+            dataset.counter_end.update(episode.end.tolist())
         finally:
             lock.release()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=128) as executor:
+        episode.save(dataset._get_episode_path(episode_id))
+        pbar.update(1)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=192) as executor:
         futures = [executor.submit(lambda i: process_parquet(dataset,train_parquets, i), i) for i in range(len(train_parquets))]
         for future in concurrent.futures.as_completed(futures):
             future.result()
