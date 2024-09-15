@@ -43,14 +43,14 @@ def convert_parquet_to_episode(parquet_file):
 
 def process_trajectory_samples():
     trajectory_dir = '/mnt/raid/orca_rl/trajectory_samples'
+    write_dir = '/mnt/raid/orca_rl/trajectory_samples_diamond_format'
 
-    os.system("rm -rf /mnt/raid/orca_rl/trajectory_samples_diamond_format/")
+    os.system(f"rm -rf {write_dir}")
 
     train_parquets = [x for x in os.listdir(trajectory_dir) if x.endswith('.parquet')]
     test_parquets = [train_parquets.pop() for _ in range(10)]
 
-
-    dataset = Dataset("/mnt/raid/orca_rl/trajectory_samples_diamond_format/train", name="train_dataset", save_on_disk=True, use_manager=False)
+    dataset = Dataset(os.path.join(write_dir, "train"), name="train_dataset", save_on_disk=True, use_manager=False)
 
     lock = Lock()
     pbar = tqdm(total=len(train_parquets))
@@ -75,7 +75,7 @@ def process_trajectory_samples():
     dataset.is_static = True
     dataset.save_to_default_path()
 
-    test_dataset = Dataset("/mnt/raid/orca_rl/trajectory_samples_diamond_format/test", name="test_dataset", save_on_disk=True, use_manager=False)
+    test_dataset = Dataset(os.path.join(write_dir, "test"), name="test_dataset", save_on_disk=True, use_manager=False)
 
     pbar = tqdm(total=len(test_parquets))
 
