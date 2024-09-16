@@ -15,3 +15,4 @@ imageio[ffmpeg]
 stable-baselines3
 moviepy 
 imageio
+scikit-learn
