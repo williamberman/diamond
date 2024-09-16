@@ -67,7 +67,7 @@ n_actions = make_env().action_space.n
 denoiser_cfg = DenoiserConfig(
     inner_model=InnerModelConfig(
         img_channels=3,
-        num_steps_conditioning=4,
+        num_steps_conditioning=16, # 4, # 8/9 frames is the distance over which the enemies move in space invaders
         cond_channels=256,
         depths=[2,2,2,2],
         channels=[64, 64, 64, 64],
@@ -121,7 +121,7 @@ def main():
     lr_sched = LambdaLR(opt, lambda s: 1 if s >= denoiser_lr_warmup_steps else s / denoiser_lr_warmup_steps)
     data_loader = DataLoader(
         dataset=Dataset(),
-        num_workers=10,
+        num_workers=14,
         batch_size=1, # not real batch size, actual batch size is denoiser_batch_size used in main_proc_data_iterator
         collate_fn=lambda x: x
     )
@@ -133,7 +133,10 @@ def main():
     ckpts = sorted([int(x.split('.')[0].split('_')[-1]) for x in os.listdir(dir) if x.endswith(".pt")])
     if len(ckpts) > 0:
         step = ckpts[-1]
-        denoiser.load_state_dict(torch.load(os.path.join(dir, f"denoiser_{step}.pt")))
+        sd = torch.load(os.path.join(dir, f"denoiser_{step}.pt"), map_location=torch.device(f"cuda:{device}"))
+        # sd["module.inner_model.act_emb.0.weight"] = sd["module.inner_model.act_emb.0.weight"][:, :256//16]
+        # sd["module.inner_model.conv_in.weight"] = torch.concat([sd["module.inner_model.conv_in.weight"], torch.zeros((64, (16+1)*3 - (4+1)*3, 3, 3), device=device)], dim=1)
+        denoiser.load_state_dict(sd, strict=True)
     else:
         step = 0
 
@@ -162,7 +165,8 @@ def main():
             if (step+1) % (100) == 0:
                 wandb.log(log_args, step=step)
 
-        if device == 0 and (step+1) % 20_000 == 0:
+        # if device == 0 and (step+1) % 20_000 == 0:
+        if device == 0 and (step+1) % 5_000 == 0:
             torch.save(denoiser.state_dict(), os.path.join(dir, f"denoiser_{step+1}.pt"))
             vid_frames, vid_paths = sample_trajectory_from_denoiser(denoiser, step+1, 5)
             wandb.log({"video": [wandb.Video(x, format='mp4') for x in vid_paths]}, step=step+1)
@@ -247,9 +251,9 @@ def main_proc_data_iterator(data_loader):
             for trajectory_idx in range(len(trajectory_buffer)):
                 trajectory = trajectory_buffer[trajectory_idx][0]
 
-                # yield chunks of 6 (what they do)
-                for start_frame_idx in range(0, trajectory.shape[0], 6):
-                    end_frame_idx = min(start_frame_idx+6, trajectory.shape[0])
+                chunk_size = denoiser_cfg.inner_model.num_steps_conditioning + 4 # they do +2 (4->6)
+                for start_frame_idx in range(0, trajectory.shape[0], chunk_size):
+                    end_frame_idx = min(start_frame_idx+chunk_size, trajectory.shape[0])
                     yield_indices.append((trajectory_idx, start_frame_idx, end_frame_idx))
 
             random.shuffle(yield_indices)
