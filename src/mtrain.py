@@ -19,6 +19,9 @@ from PIL import Image
 
 device = int(os.environ['LOCAL_RANK'])
 
+dir = "/mnt/raid/diamond/denoiser"
+os.makedirs(dir, exist_ok=True)
+
 def make_env():
     return make_atari_env("BreakoutNoFrameskip-v4", 64, None)
 
@@ -112,7 +115,12 @@ def main():
     opt.zero_grad()
     data_iterator = iter(data_loader)
 
-    step = 0
+    ckpts = sorted([int(x.split('.')[0]) for x in os.listdir(dir) if x.endswith(".pt")])
+    if len(ckpts) > 0:
+        step = ckpts[-1]
+        denoiser.load_state_dict(torch.load(os.path.join(dir, f"denoiser_{step}.pt")))
+    else:
+        step = 0
 
     while True:
         t0 = time.perf_counter()
@@ -137,7 +145,8 @@ def main():
         if device == 0:
             print(f"Step {step}: {log_args}")
 
-        if device == 0 and (step+1) % 200 == 0:
+        if device == 0 and (step+1) % 1000 == 0:
+            torch.save(denoiser.state_dict(), os.path.join(dir, f"denoiser_{step}.pt"))
             sample_trajectory_from_denoiser(denoiser, step)
 
         torch.distributed.barrier()
@@ -172,7 +181,7 @@ def sample_trajectory_from_denoiser(denoiser, step):
     state = state.squeeze(0)
     state = [x.permute(1, 2, 0).mul(255).add(1).div(2).to(torch.uint8).cpu().numpy() for x in state]
     state = [Image.fromarray(x).resize((128,128)) for x in state]
-    imageio.mimsave(f"trajectory_{step}.mp4", state, fps=30)
+    imageio.mimsave(os.path.join(dir, f"trajectory_{step}.mp4"), state, fps=30)
 
 class Dataset(torch.utils.data.IterableDataset):
     @torch.no_grad()
