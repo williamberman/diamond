@@ -11,8 +11,13 @@ from envs.atari_preprocessing import AtariPreprocessing
 from envs.env import TorchEnv, DoneOnLifeLoss
 from typing import Optional
 import time
+from torch.nn.parallel import DistributedDataParallel as DDP
+import os
+from models.diffusion.diffusion_sampler import DiffusionSampler, DiffusionSamplerConfig
+import imageio
+from PIL import Image
 
-device = 0
+device = int(os.environ['LOCAL_RANK'])
 
 def make_env():
     return make_atari_env("BreakoutNoFrameskip-v4", 64, None)
@@ -77,9 +82,23 @@ denoiser_max_grad_norm = 1.0
 
 denoiser_batch_size =  32
 
+diffusion_sampler_cfg = DiffusionSamplerConfig(
+    num_steps_denoising=3,
+    sigma_min=2e-3,
+    sigma_max=5.0,
+    rho=7,
+    order=1,  # 1: Euler, 2: Heun
+    s_churn=0.0,  # Amount of stochasticity
+    s_tmin=0.0,
+    s_tmax=float("inf"),
+    s_noise=1.0
+)
+
 def main():
-    denoiser = Denoiser(denoiser_cfg).to(device)
-    denoiser.setup_training(sigma_distribution_cfg)
+    torch.distributed.init_process_group(backend="nccl")
+
+    denoiser = DDP(Denoiser(denoiser_cfg).to(device), device_ids=[device] )
+    denoiser.module.setup_training(sigma_distribution_cfg)
     opt = configure_opt(denoiser, **denoiser_optimizer_cfg)
     lr_sched = LambdaLR(opt, lambda s: 1 if s >= denoiser_lr_warmup_steps else s / denoiser_lr_warmup_steps)
     data_loader = DataLoader(
@@ -115,9 +134,45 @@ def main():
             "time": time.perf_counter() - t0,
         }
 
-        print(f"Step {step}: {log_args}")
+        if device == 0:
+            print(f"Step {step}: {log_args}")
+
+        if device == 0 and (step+1) % 200 == 0:
+            sample_trajectory_from_denoiser(denoiser, step)
+
+        torch.distributed.barrier()
 
         step += 1
+
+@torch.no_grad()
+def sample_trajectory_from_denoiser(denoiser, step):
+    denoiser = denoiser.module
+
+    env = make_env()
+    state, _ = env.reset()
+    state = [state]
+    act = [env.action_space.sample()]
+    # get 4 frames
+    for _ in range(3):
+        next_obs, _, _, _, _ = env.step(act[-1])
+        state.append(next_obs)
+        act.append(env.action_space.sample())
+
+    state = [torch.tensor(x).div(255).mul(2).sub(1).permute(2, 0, 1) for x in state]
+    state = torch.stack(state).unsqueeze(0).to(device)
+    act = torch.stack([torch.tensor(a) for a in act]).unsqueeze(0).to(device)
+        
+    sampler = DiffusionSampler(denoiser, diffusion_sampler_cfg)
+
+    for _ in range(30*10):
+        next_state, _ = sampler.sample_next_obs(state[:, -4:], act[:,-4:])
+        state = torch.cat([state, next_state.unsqueeze(1)], dim=1)
+        act = torch.cat([act, torch.tensor(env.action_space.sample(), device=device)[None, None]], dim=1)
+
+    state = state.squeeze(0)
+    state = [x.permute(1, 2, 0).mul(255).add(1).div(2).to(torch.uint8).cpu().numpy() for x in state]
+    state = [Image.fromarray(x).resize((128,128)) for x in state]
+    imageio.mimsave(f"trajectory_{step}.mp4", state, fps=30)
 
 class Dataset(torch.utils.data.IterableDataset):
     @torch.no_grad()
@@ -146,10 +201,12 @@ class Dataset(torch.utils.data.IterableDataset):
             obs = torch.stack(obs)
             act = torch.stack(act)
 
-            yield dict(obs=obs, act=act)
+            # yield chunks of 6 (what they do)
+            for i in range(0, obs.shape[0], 6):
+                yield dict(obs=obs[i:i+6], act=act[i:i+6])
 
 def compute_loss_denoiser(denoiser, batch_obs, batch_act) -> ComputeLossOutput:
-    n = denoiser.cfg.inner_model.num_steps_conditioning
+    n = denoiser.module.cfg.inner_model.num_steps_conditioning
     _, c, h, w = batch_obs[0].shape
 
     loop_len = max([obs.shape[0] for obs in batch_obs])-n-1
@@ -183,10 +240,10 @@ def compute_loss_denoiser(denoiser, batch_obs, batch_act) -> ComputeLossOutput:
         b, t, c, h, w = obs.shape
         obs = obs.reshape(b, t * c, h, w)
 
-        sigma = denoiser.sample_sigma_training(b, denoiser.device)
-        _, c_out, c_skip, _ = denoiser._compute_conditioners(sigma)
+        sigma = denoiser.module.sample_sigma_training(b, denoiser.device)
+        _, c_out, c_skip, _ = denoiser.module._compute_conditioners(sigma)
 
-        offset_noise = denoiser.cfg.sigma_offset_noise * torch.randn(b, c, 1, 1, device=next_obs.device)
+        offset_noise = denoiser.module.cfg.sigma_offset_noise * torch.randn(b, c, 1, 1, device=next_obs.device)
         noisy_next_obs = next_obs + offset_noise + torch.randn_like(next_obs) * add_dims(sigma, next_obs.ndim)
 
         model_output, denoised = denoiser(noisy_next_obs, sigma, obs, act)
