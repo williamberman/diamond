@@ -175,15 +175,18 @@ def main():
 def sample_trajectory_from_denoiser(denoiser, step):
     denoiser = denoiser.module
 
+    denoiser.eval()
+
+    agent = load_random_agent()
     env = make_env()
     state, _ = env.reset()
     state = [state]
-    act = [env.action_space.sample()]
-    # get 4 frames
-    for _ in range(3):
+    act = [get_action(agent, state)]
+
+    for _ in range(random.randint(10, 60)):
         next_obs, _, _, _, _ = env.step(act[-1])
         state.append(next_obs)
-        act.append(env.action_space.sample())
+        act.append(get_action(agent, state))
 
     state = [torch.tensor(x).div(255).mul(2).sub(1).permute(2, 0, 1) for x in state]
     state = torch.stack(state).unsqueeze(0).to(device)
@@ -203,6 +206,9 @@ def sample_trajectory_from_denoiser(denoiser, step):
     state = [Image.fromarray(x).resize((128,128)) for x in state]
     path = os.path.join(dir, f"trajectory_{step}.mp4")
     imageio.mimsave(path, state, fps=30)
+
+    denoiser.train()
+
     return wandb_frames, path
 
 def get_action(agent, obs):
