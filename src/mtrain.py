@@ -17,11 +17,16 @@ from models.diffusion.diffusion_sampler import DiffusionSampler, DiffusionSample
 import imageio
 from PIL import Image
 import numpy as np
-import wandb
 import tqdm
 from torch.distributions import Categorical
 import random
 import cv2
+
+import wandb
+class dummy_wandb:
+    def init(*args, **kwargs): pass
+    def log(*args, **kwargs): pass
+# wandb = dummy_wandb()
 
 device = int(os.environ['LOCAL_RANK'])
 
@@ -90,7 +95,7 @@ denoiser_lr_warmup_steps = 100
 
 denoiser_max_grad_norm = 1.0
 
-denoiser_batch_size =  32
+denoiser_batch_size = 4 # 32 single gpu, 4 for 8 gpus
 
 diffusion_sampler_cfg = DiffusionSamplerConfig(
     num_steps_denoising=3,
@@ -116,14 +121,14 @@ def main():
     lr_sched = LambdaLR(opt, lambda s: 1 if s >= denoiser_lr_warmup_steps else s / denoiser_lr_warmup_steps)
     data_loader = DataLoader(
         dataset=Dataset(),
-        num_workers=0,
-        batch_size=denoiser_batch_size,
+        num_workers=192//8,
+        batch_size=1, # not real batch size, actual batch size is denoiser_batch_size used in main_proc_data_iterator
         collate_fn=lambda x: x
     )
 
     denoiser.train()
     opt.zero_grad()
-    data_iterator = iter(data_loader)
+    data_iterator = main_proc_data_iterator(data_loader)
 
     ckpts = sorted([int(x.split('.')[0].split('_')[-1]) for x in os.listdir(dir) if x.endswith(".pt")])
     if len(ckpts) > 0:
@@ -136,9 +141,7 @@ def main():
         t0 = time.perf_counter()
 
         batch = next(data_iterator)
-        obs = [x["obs"].to(device) for x in batch]
-        act = [x["act"].to(device) for x in batch]
-        loss = compute_loss_denoiser(denoiser, obs, act)
+        loss = compute_loss_denoiser(denoiser, batch["obs"], batch["act"])
 
         grad_norm = torch.nn.utils.clip_grad_norm_(denoiser.parameters(), denoiser_max_grad_norm)
         opt.step()
@@ -211,12 +214,55 @@ def get_action(agent, obs):
     action, _, _, _ = agent.get_action_and_value(agent_inp)
     return torch.tensor(action.item())
 
+def main_proc_data_iterator(data_loader):
+    data_loader = iter(data_loader)
+
+    def inner():
+        while True:
+            trajectory_buffer = next(data_loader)
+            assert len(trajectory_buffer) == 1
+            trajectory_buffer = trajectory_buffer[0]
+
+            yield_indices = []
+
+            for trajectory_idx in range(len(trajectory_buffer)):
+                trajectory = trajectory_buffer[trajectory_idx][0]
+
+                # yield chunks of 6 (what they do)
+                for start_frame_idx in range(0, trajectory.shape[0], 6):
+                    end_frame_idx = min(start_frame_idx+6, trajectory.shape[0])
+                    yield_indices.append((trajectory_idx, start_frame_idx, end_frame_idx))
+
+            random.shuffle(yield_indices)
+
+            for trajectory_idx, start_frame_idx, end_frame_idx in yield_indices:
+                obs, act = trajectory_buffer[trajectory_idx]
+                obs = obs[start_frame_idx:end_frame_idx]
+                act = act[start_frame_idx:end_frame_idx]
+                yield dict(obs=obs, act=act)
+
+    inner_iterator = inner()
+
+    while True:
+        obs = []
+        act = []
+
+        for _ in range(denoiser_batch_size):
+            x = next(inner_iterator)
+            obs.append(x["obs"].to(device))
+            act.append(x['act'].to(device))
+
+        yield dict(obs=obs, act=act)
+
+
 class Dataset(torch.utils.data.IterableDataset):
     @torch.no_grad()
     def __iter__(self):
         env = make_env()
         agent = load_random_agent()
         trajectory_ctr = 0
+
+        trajectory_buffer = []
 
         while True:
             if (trajectory_ctr+1) % 200 == 0:
@@ -239,15 +285,16 @@ class Dataset(torch.utils.data.IterableDataset):
                 if terminated or truncated:
                     break
 
-            obs = [torch.tensor(o).div(255).mul(2).sub(1).permute(2, 0, 1) for o in obs]
-            obs = torch.stack(obs)
+            obs = torch.stack([torch.tensor(o).div(255).mul(2).sub(1).permute(2, 0, 1) for o in obs])
             act = torch.stack(act)
+            trajectory_buffer.append((obs, act))
 
-            # yield chunks of 6 (what they do)
-            for i in range(0, obs.shape[0], 6):
-                yield dict(obs=obs[i:i+6], act=act[i:i+6])
+            if len(trajectory_buffer) == 10:
+                yield trajectory_buffer
+                trajectory_buffer.clear()
 
             trajectory_ctr += 1
+            # print(f"Collected {trajectory_ctr} trajectories. trajectory_buffer: {len(trajectory_buffer)}")
 
 def compute_loss_denoiser(denoiser, batch_obs, batch_act) -> ComputeLossOutput:
     n = denoiser.module.cfg.inner_model.num_steps_conditioning
@@ -352,7 +399,7 @@ def load_random_agent():
     agent = Agent()
     agent.load_state_dict(torch.load(policy_path, map_location="cpu"))
     agent.eval()
-    print(f"Loaded policy: {policy_path}")
+    # print(f"Loaded policy: {policy_path}")
     return agent
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
