@@ -16,6 +16,9 @@ import os
 from models.diffusion.diffusion_sampler import DiffusionSampler, DiffusionSamplerConfig
 import imageio
 from PIL import Image
+import numpy as np
+import wandb
+import tqdm
 
 device = int(os.environ['LOCAL_RANK'])
 
@@ -100,6 +103,9 @@ diffusion_sampler_cfg = DiffusionSamplerConfig(
 def main():
     torch.distributed.init_process_group(backend="nccl")
 
+    if device == 0:
+        wandb.init(project="diamond_denoiser")
+
     denoiser = DDP(Denoiser(denoiser_cfg).to(device), device_ids=[device] )
     denoiser.module.setup_training(sigma_distribution_cfg)
     opt = configure_opt(denoiser, **denoiser_optimizer_cfg)
@@ -115,7 +121,7 @@ def main():
     opt.zero_grad()
     data_iterator = iter(data_loader)
 
-    ckpts = sorted([int(x.split('.')[0]) for x in os.listdir(dir) if x.endswith(".pt")])
+    ckpts = sorted([int(x.split('.')[0].split('_')[-1]) for x in os.listdir(dir) if x.endswith(".pt")])
     if len(ckpts) > 0:
         step = ckpts[-1]
         denoiser.load_state_dict(torch.load(os.path.join(dir, f"denoiser_{step}.pt")))
@@ -144,10 +150,12 @@ def main():
 
         if device == 0:
             print(f"Step {step}: {log_args}")
+            wandb.log(log_args, step=step)
 
         if device == 0 and (step+1) % 1000 == 0:
-            torch.save(denoiser.state_dict(), os.path.join(dir, f"denoiser_{step}.pt"))
-            sample_trajectory_from_denoiser(denoiser, step)
+            torch.save(denoiser.state_dict(), os.path.join(dir, f"denoiser_{step+1}.pt"))
+            vid, vid_path = sample_trajectory_from_denoiser(denoiser, step+1)
+            wandb.log({"video": wandb.Video(vid_path, format='mp4')}, step=step+1)
 
         torch.distributed.barrier()
 
@@ -173,15 +181,19 @@ def sample_trajectory_from_denoiser(denoiser, step):
         
     sampler = DiffusionSampler(denoiser, diffusion_sampler_cfg)
 
-    for _ in range(30*10):
+    for _ in tqdm.tqdm(range(30*10)):
         next_state, _ = sampler.sample_next_obs(state[:, -4:], act[:,-4:])
+        next_state = next_state.clamp(-1, 1)
         state = torch.cat([state, next_state.unsqueeze(1)], dim=1)
         act = torch.cat([act, torch.tensor(env.action_space.sample(), device=device)[None, None]], dim=1)
 
     state = state.squeeze(0)
-    state = [x.permute(1, 2, 0).mul(255).add(1).div(2).to(torch.uint8).cpu().numpy() for x in state]
+    state = [x.permute(1, 2, 0).add(1).div(2).mul(255).to(torch.uint8).cpu().numpy() for x in state]
+    wandb_frames = np.stack([x.transpose(2, 0, 1) for x in state])
     state = [Image.fromarray(x).resize((128,128)) for x in state]
-    imageio.mimsave(os.path.join(dir, f"trajectory_{step}.mp4"), state, fps=30)
+    path = os.path.join(dir, f"trajectory_{step}.mp4")
+    imageio.mimsave(path, state, fps=30)
+    return wandb_frames, path
 
 class Dataset(torch.utils.data.IterableDataset):
     @torch.no_grad()
