@@ -12,6 +12,6 @@ numpy==1.26.0
 pandas
 pyarrow
 imageio[ffmpeg]
-stable-baselines3[extra]
+stable-baselines3
 moviepy 
 imageio
