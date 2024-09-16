@@ -6,3 +6,5 @@ python src/main.py env.train.id=BreakoutNoFrameskip-v4 common.device=cuda:0 coll
 
 python src/convert_trajectories_to_diamond_format.py
 python src/main.py env.train.id=ALE/SpaceInvaders-v5 common.device=cuda:0 collection.path_to_static_dataset=/mnt/raid/orca_rl/trajectory_samples_diamond_format/
+
+python src/main.py env.train.id=ALE/SpaceInvaders-v5 common.device=cuda:0 collection.path_to_static_dataset=/mnt/raid/orca_rl/trajectory_samples_diamond_format_2/

@@ -13,3 +13,5 @@ pandas
 pyarrow
 imageio[ffmpeg]
 stable-baselines3[extra]
+moviepy 
+imageio

@@ -19,14 +19,18 @@ from PIL import Image
 import numpy as np
 import wandb
 import tqdm
+from torch.distributions import Categorical
+import random
+import cv2
 
 device = int(os.environ['LOCAL_RANK'])
 
-dir = "/mnt/raid/diamond/denoiser"
+dir = "/mnt/raid/diamond/spaceinvaders/denoiser"
 os.makedirs(dir, exist_ok=True)
 
 def make_env():
-    return make_atari_env("BreakoutNoFrameskip-v4", 64, None)
+    # return make_atari_env("BreakoutNoFrameskip-v4", 64, None)
+    return make_atari_env("ALE/SpaceInvaders-v5", 64, None)
 
 def make_atari_env(
     id: str,
@@ -53,7 +57,7 @@ def make_atari_env(
 
     return env
 
-num_actions = make_env().action_space.n
+n_actions = make_env().action_space.n
 
 denoiser_cfg = DenoiserConfig(
     inner_model=InnerModelConfig(
@@ -63,7 +67,7 @@ denoiser_cfg = DenoiserConfig(
         depths=[2,2,2,2],
         channels=[64, 64, 64, 64],
         attn_depths=[0, 0, 0, 0],
-        num_actions=num_actions,
+        num_actions=n_actions,
     ),
     sigma_data=0.5,
     sigma_offset_noise=0.3,
@@ -195,25 +199,42 @@ def sample_trajectory_from_denoiser(denoiser, step):
     imageio.mimsave(path, state, fps=30)
     return wandb_frames, path
 
+def get_action(agent, obs):
+    if len(obs) < 4:
+        return torch.tensor(random.randint(0, n_actions-1))
+
+    agent_inp = obs[-4:]
+    agent_inp = [cv2.resize(x, (84, 84), interpolation=cv2.INTER_AREA) for x in agent_inp]
+    agent_inp = [cv2.cvtColor(x, cv2.COLOR_RGB2GRAY) for x in agent_inp]
+    agent_inp = np.stack(agent_inp, axis=0)
+    agent_inp = torch.tensor(agent_inp, dtype=torch.float32).unsqueeze(0)
+    action, _, _, _ = agent.get_action_and_value(agent_inp)
+    return torch.tensor(action.item())
+
 class Dataset(torch.utils.data.IterableDataset):
     @torch.no_grad()
     def __iter__(self):
         env = make_env()
+        agent = load_random_agent()
+        trajectory_ctr = 0
 
         while True:
+            if (trajectory_ctr+1) % 200 == 0:
+                agent = load_random_agent()
+
             obs = [] 
             act = [] 
 
             state, _ = env.reset()
 
             obs.append(state)
-            act.append(torch.tensor(env.action_space.sample()))
+            act.append(get_action(agent, obs))
 
             while True:
                 next_obs, reward, terminated, truncated, info = env.step(act[-1])
 
                 obs.append(next_obs)
-                act.append(torch.tensor(env.action_space.sample()))
+                act.append(get_action(agent, obs))
 
                 if terminated or truncated:
                     break
@@ -225,6 +246,8 @@ class Dataset(torch.utils.data.IterableDataset):
             # yield chunks of 6 (what they do)
             for i in range(0, obs.shape[0], 6):
                 yield dict(obs=obs[i:i+6], act=act[i:i+6])
+
+            trajectory_ctr += 1
 
 def compute_loss_denoiser(denoiser, batch_obs, batch_act) -> ComputeLossOutput:
     n = denoiser.module.cfg.inner_model.num_steps_conditioning
@@ -320,6 +343,50 @@ def configure_opt(model: nn.Module, lr: float, weight_decay: float, eps: float, 
     ]
     optimizer = AdamW(optim_groups, lr=lr, eps=eps)
     return optimizer
+
+def load_random_agent():
+    policy_dir = "/mnt/raid/orca_rl/ppo_space_invaders/"
+    policy = random.choice([x for x in os.listdir(policy_dir) if x.endswith('.pt')])
+    policy_path = os.path.join(policy_dir, policy)
+    print(f"Loading policy: {policy_path}")
+    agent = Agent()
+    agent.load_state_dict(torch.load(policy_path, map_location="cpu"))
+    agent.eval()
+    print(f"Loaded policy: {policy_path}")
+    return agent
+
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+class Agent(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(64 * 7 * 7, 512)),
+            nn.ReLU(),
+        )
+        self.actor = layer_init(nn.Linear(512, n_actions), std=0.01)
+        self.critic = layer_init(nn.Linear(512, 1), std=1)
+
+    def get_value(self, x):
+        return self.critic(self.network(x / 255.0))
+
+    def get_action_and_value(self, x, action=None):
+        hidden = self.network(x / 255.0)
+        logits = self.actor(hidden)
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
 if __name__ == "__main__":
     main()
