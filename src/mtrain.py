@@ -21,6 +21,9 @@ import tqdm
 from torch.distributions import Categorical
 import random
 import cv2
+from torchvision import transforms
+from smol_conv_classifier import ImprovedCNN
+import torch.multiprocessing as mp
 
 import wandb
 class dummy_wandb:
@@ -32,6 +35,8 @@ device = int(os.environ['LOCAL_RANK'])
 
 dir = "/mnt/raid/diamond/spaceinvaders/denoiser"
 os.makedirs(dir, exist_ok=True)
+
+use_labeled_actions = False
 
 def make_env():
     # return make_atari_env("BreakoutNoFrameskip-v4", 64, None)
@@ -95,7 +100,7 @@ denoiser_lr_warmup_steps = 100
 
 denoiser_max_grad_norm = 1.0
 
-denoiser_batch_size = 4 # 32 single gpu, 4 for 8 gpus
+denoiser_batch_size = 8 # 32 single gpu, 4 for 8 gpus, 8 -> 35 for 7 gpus
 
 diffusion_sampler_cfg = DiffusionSamplerConfig(
     num_steps_denoising=3,
@@ -109,7 +114,11 @@ diffusion_sampler_cfg = DiffusionSamplerConfig(
     s_noise=1.0
 )
 
+def collate_fn(x): return x
+
 def main():
+    mp.set_start_method("spawn")
+
     torch.distributed.init_process_group(backend="nccl")
 
     if device == 0:
@@ -121,9 +130,10 @@ def main():
     lr_sched = LambdaLR(opt, lambda s: 1 if s >= denoiser_lr_warmup_steps else s / denoiser_lr_warmup_steps)
     data_loader = DataLoader(
         dataset=Dataset(),
-        num_workers=14,
+        num_workers=2,
         batch_size=1, # not real batch size, actual batch size is denoiser_batch_size used in main_proc_data_iterator
-        collate_fn=lambda x: x
+        collate_fn=collate_fn,
+        prefetch_factor=2,
     )
 
     denoiser.train()
@@ -133,7 +143,7 @@ def main():
     ckpts = sorted([int(x.split('.')[0].split('_')[-1]) for x in os.listdir(dir) if x.endswith(".pt")])
     if len(ckpts) > 0:
         step = ckpts[-1]
-        sd = torch.load(os.path.join(dir, f"denoiser_{step}.pt"), map_location=torch.device(f"cuda:{device}"))
+        sd = torch.load(os.path.join(dir, f"denoiser_{step}.pt"), map_location=torch.device(f"cuda:{device}"), weights_only=True)
         # sd["module.inner_model.act_emb.0.weight"] = sd["module.inner_model.act_emb.0.weight"][:, :256//16]
         # sd["module.inner_model.conv_in.weight"] = torch.concat([sd["module.inner_model.conv_in.weight"], torch.zeros((64, (16+1)*3 - (4+1)*3, 3, 3), device=device)], dim=1)
         denoiser.load_state_dict(sd, strict=True)
@@ -226,6 +236,8 @@ def sample_trajectory_from_denoiser(denoiser, step, n_videos):
     return all_wandb_frames, all_paths
 
 def get_action(agent, obs):
+    agent_device = next(agent.parameters()).device
+
     if len(obs) < 4:
         return torch.tensor(random.randint(0, n_actions-1))
 
@@ -234,10 +246,13 @@ def get_action(agent, obs):
     agent_inp = [cv2.cvtColor(x, cv2.COLOR_RGB2GRAY) for x in agent_inp]
     agent_inp = np.stack(agent_inp, axis=0)
     agent_inp = torch.tensor(agent_inp, dtype=torch.float32).unsqueeze(0)
+    agent_inp = agent_inp.to(agent_device)
     action, _, _, _ = agent.get_action_and_value(agent_inp)
     return torch.tensor(action.item())
 
 def main_proc_data_iterator(data_loader):
+    chunk_size = denoiser_cfg.inner_model.num_steps_conditioning + 4 # they do +2 (4->6)
+
     data_loader = iter(data_loader)
 
     def inner():
@@ -251,17 +266,20 @@ def main_proc_data_iterator(data_loader):
             for trajectory_idx in range(len(trajectory_buffer)):
                 trajectory = trajectory_buffer[trajectory_idx][0]
 
-                chunk_size = denoiser_cfg.inner_model.num_steps_conditioning + 4 # they do +2 (4->6)
-                for start_frame_idx in range(0, trajectory.shape[0], chunk_size):
-                    end_frame_idx = min(start_frame_idx+chunk_size, trajectory.shape[0])
+                for start_frame_idx in range(0, trajectory.shape[0]-chunk_size):
+                    end_frame_idx = start_frame_idx+chunk_size
                     yield_indices.append((trajectory_idx, start_frame_idx, end_frame_idx))
 
             random.shuffle(yield_indices)
+
+            # print(f"n actual samples: {len(yield_indices)} n actual batches {len(yield_indices) // denoiser_batch_size}")
 
             for trajectory_idx, start_frame_idx, end_frame_idx in yield_indices:
                 obs, act = trajectory_buffer[trajectory_idx]
                 obs = obs[start_frame_idx:end_frame_idx]
                 act = act[start_frame_idx:end_frame_idx]
+                assert len(obs) == len(act)
+                assert len(obs) == chunk_size
                 yield dict(obs=obs, act=act)
 
     inner_iterator = inner()
@@ -287,7 +305,17 @@ class Dataset(torch.utils.data.IterableDataset):
 
         trajectory_buffer = []
 
+        if use_labeled_actions:
+            action_labeler = ImprovedCNN(n_actions, 3).to(device)
+            action_labeler.load_state_dict(torch.load("smol_conv_classifier_4.pt", map_location="cpu", weights_only=True))
+            action_labeler.eval()
+
+            labeler_mean = torch.tensor([0.485, 0.456, 0.406], device=device)[None, :, None, None]
+            labeler_std = torch.tensor([0.229, 0.224, 0.225], device=device)[None, :, None, None]
+
         while True:
+            t0 = time.perf_counter()
+
             if (trajectory_ctr+1) % 200 == 0:
                 agent = load_random_agent()
 
@@ -307,9 +335,29 @@ class Dataset(torch.utils.data.IterableDataset):
 
                 if terminated or truncated:
                     break
+            
+            if use_labeled_actions:
+                # TODO - make sure this all is the same as in training the action labeler
+                obs_ = []
+                next_obs_ = []
+
+                for i in range(len(obs)-1):
+                    obs_.append(torch.tensor(obs[i]))
+                    next_obs_.append(torch.tensor(obs[i+1]))
+
+                obs_ = torch.stack(obs_).to(device).permute(0, 3, 1, 2).float().div(255).sub(labeler_mean).div(labeler_std)
+                next_obs_ = torch.stack(next_obs_).to(device).permute(0, 3, 1, 2).float().div(255).sub(labeler_mean).div(labeler_std)
+                deltas = next_obs_ - obs_
+
+                labeled_act = action_labeler(deltas).argmax(dim=1).to('cpu')
+                labeled_act = torch.concat([labeled_act, act[-1].unsqueeze(0)])
+                assert len(labeled_act) == len(obs)
+                act = labeled_act
+            else:
+                act = torch.stack(act)
 
             obs = torch.stack([torch.tensor(o).div(255).mul(2).sub(1).permute(2, 0, 1) for o in obs])
-            act = torch.stack(act)
+
             trajectory_buffer.append((obs, act))
 
             if len(trajectory_buffer) == 10:
@@ -317,7 +365,7 @@ class Dataset(torch.utils.data.IterableDataset):
                 trajectory_buffer.clear()
 
             trajectory_ctr += 1
-            # print(f"Collected {trajectory_ctr} trajectories. trajectory_buffer: {len(trajectory_buffer)}")
+            # print(f"Collected {trajectory_ctr} trajectories. trajectory_buffer: {len(trajectory_buffer)} time: {time.perf_counter() - t0} steps in trajectory: {obs.shape[0]}")
 
 def compute_loss_denoiser(denoiser, batch_obs, batch_act) -> ComputeLossOutput:
     n = denoiser.module.cfg.inner_model.num_steps_conditioning
@@ -414,13 +462,13 @@ def configure_opt(model: nn.Module, lr: float, weight_decay: float, eps: float, 
     optimizer = AdamW(optim_groups, lr=lr, eps=eps)
     return optimizer
 
-def load_random_agent():
+def load_random_agent(device="cpu"):
     policy_dir = "/mnt/raid/orca_rl/ppo_space_invaders/"
     policy = random.choice([x for x in os.listdir(policy_dir) if x.endswith('.pt')])
     policy_path = os.path.join(policy_dir, policy)
     print(f"Loading policy: {policy_path}")
-    agent = Agent()
-    agent.load_state_dict(torch.load(policy_path, map_location="cpu"))
+    agent = Agent().to(device)
+    agent.load_state_dict(torch.load(policy_path, map_location=device, weights_only=True))
     agent.eval()
     # print(f"Loaded policy: {policy_path}")
     return agent
