@@ -192,7 +192,7 @@ def sample_trajectory_from_denoiser(denoiser, step, n_videos):
         state = [state]
         act = [get_action(agent, state)]
 
-        n_init_steps = random.randint(10, 60)
+        n_init_steps = random.randint(denoiser_cfg.inner_model.num_steps_conditioning, 60)
 
         for _ in range(n_init_steps):
             next_obs, _, _, _, _ = env.step(act[-1])
@@ -206,7 +206,7 @@ def sample_trajectory_from_denoiser(denoiser, step, n_videos):
         sampler = DiffusionSampler(denoiser, diffusion_sampler_cfg)
 
         for _ in tqdm.tqdm(range(30*10)):
-            next_state, _ = sampler.sample_next_obs(state[:, -4:], act[:,-4:])
+            next_state, _ = sampler.sample_next_obs(state[:, -denoiser_cfg.inner_model.num_steps_conditioning:], act[:,-denoiser_cfg.inner_model.num_steps_conditioning:])
             next_state = next_state.clamp(-1, 1)
             state = torch.cat([state, next_state.unsqueeze(1)], dim=1)
             act = torch.cat([act, torch.tensor(env.action_space.sample(), device=device)[None, None]], dim=1)
