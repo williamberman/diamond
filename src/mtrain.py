@@ -121,7 +121,7 @@ def main():
     lr_sched = LambdaLR(opt, lambda s: 1 if s >= denoiser_lr_warmup_steps else s / denoiser_lr_warmup_steps)
     data_loader = DataLoader(
         dataset=Dataset(),
-        num_workers=192//8,
+        num_workers=10,
         batch_size=1, # not real batch size, actual batch size is denoiser_batch_size used in main_proc_data_iterator
         collate_fn=lambda x: x
     )
@@ -152,14 +152,17 @@ def main():
             "loss": loss,
             "grad_norm": grad_norm.item(),
             "lr": lr_sched.get_last_lr()[0],
-            "time": time.perf_counter() - t0,
+            "seconds_per_step": time.perf_counter() - t0,
+            "steps_per_second": 1 / (time.perf_counter() - t0),
+            "steps_per_hour": 3600 / (time.perf_counter() - t0),
         }
 
         if device == 0:
             print(f"Step {step}: {log_args}")
-            wandb.log(log_args, step=step)
+            if (step+1) % (100) == 0:
+                wandb.log(log_args, step=step)
 
-        if device == 0 and (step+1) % 1000 == 0:
+        if device == 0 and (step+1) % 20_000 == 0:
             torch.save(denoiser.state_dict(), os.path.join(dir, f"denoiser_{step+1}.pt"))
             vid, vid_path = sample_trajectory_from_denoiser(denoiser, step+1)
             wandb.log({"video": wandb.Video(vid_path, format='mp4')}, step=step+1)
