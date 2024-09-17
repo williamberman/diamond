@@ -173,7 +173,7 @@ class Dataset(torch.utils.data.IterableDataset):
 
         if use_labeled_actions:
             action_labeler = ImprovedCNN(n_actions, 3).to(device)
-            action_labeler.load_state_dict(torch.load("smol_conv_classifier_4.pt", map_location="cpu", weights_only=True))
+            action_labeler.load_state_dict(torch.load("smol_conv_classifier_final.pt", map_location="cpu", weights_only=True))
             action_labeler.eval()
 
             labeler_mean = torch.tensor([0.485, 0.456, 0.406], device=device)[None, :, None, None]
