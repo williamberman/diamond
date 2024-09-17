@@ -82,7 +82,7 @@ def main():
             if (step+1) % 100 == 0:
                 wandb.log(log_args, step=step)
 
-        if device == 0 and (step+1) % 5_000 == 0:
+        if device == 0 and (step+1) % 1_000 == 0:
             torch.save(model.state_dict(), os.path.join(dir, f"rew_end_{step+1}.pt"))
             # validation(model, step+1)
 

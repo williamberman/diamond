@@ -154,7 +154,7 @@ def make_world_model_env(actor_critic):
     )).to(device)
     rew_end_model.eval()
 
-    rew_end_model_state_dict = torch.load("/mnt/raid/diamond/spaceinvaders/rew_end_model/rew_end_model_100000.pt", map_location="cpu", weights_only=True)
+    rew_end_model_state_dict = torch.load("/mnt/raid/diamond/spaceinvaders/rew_end/rew_end_1000.pt", map_location="cpu", weights_only=True)
     rew_end_model_state_dict = {k.replace("module.", ""): v for k, v in rew_end_model_state_dict.items()}
     rew_end_model.load_state_dict(rew_end_model_state_dict, strict=True)
 
