@@ -97,8 +97,8 @@ def main():
             if (step+1) % (100) == 0:
                 wandb.log(log_args, step=step)
 
-        # if device == 0 and (step+1) % 20_000 == 0:
-        if device == 0 and (step+1) % 5_000 == 0:
+        if device == 0 and (step+1) % 15_000 == 0:
+        # if device == 0 and (step+1) % 5_000 == 0:
             # torch.save(denoiser.state_dict(), os.path.join(dir, f"denoiser_{step+1}.pt"))
             vid_frames, vid_paths = validation(denoiser, step+1, 5)
             wandb.log({"video": [wandb.Video(x, format='mp4') for x in vid_paths]}, step=step+1)
@@ -162,7 +162,7 @@ def main_proc_data_iterator():
         obs = []
         act = []
 
-        for _ in range(8): # 32 single gpu, 4 for 8 gpus, 8 -> 35 for 7 gpus
+        for _ in range(32): # 32 single gpu, 4 for 8 gpus, 8 -> 35 for 7 gpus
             x = next(inner_iterator)
             obs.append(x["obs"].to(device))
             act.append(x['act'].to(device))
