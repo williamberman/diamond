@@ -140,6 +140,8 @@ class Dataset(torch.utils.data.IterableDataset):
 
             obs = [] 
             act = [] 
+            rew = []
+            end = []
 
             def get_action():
                 if len(obs) < 4:
@@ -151,21 +153,26 @@ class Dataset(torch.utils.data.IterableDataset):
 
             obs.append(state)
             act.append(get_action())
+            rew.append(torch.tensor(0, dtype=torch.long))
+            end.append(torch.tensor(0, dtype=torch.long))
 
             while True:
-                next_obs, reward, terminated, truncated, info = env.step(act[-1])
+                next_obs, reward_, terminated, truncated, info = env.step(act[-1])
 
                 obs.append(next_obs)
                 act.append(get_action())
+                rew.append(torch.tensor(reward_).clamp(-1, 1).to(dtype=torch.long))
+                end.append(torch.tensor(int(terminated or truncated), dtype=torch.long))
 
                 if terminated or truncated:
                     break
             
-            act = torch.stack(act)
-
             obs = torch.stack([torch.tensor(o).div(255).mul(2).sub(1).permute(2, 0, 1) for o in obs])
+            act = torch.stack(act)
+            rew = torch.stack(rew)
+            end = torch.stack(end)
 
-            trajectory_buffer.append(dict(obs=obs, act=act))
+            trajectory_buffer.append(dict(obs=obs, act=act, rew=rew, end=end))
 
             if len(trajectory_buffer) == 10:
                 yield trajectory_buffer

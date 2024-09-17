@@ -7,7 +7,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import os
 import random
 from models.rew_end_model import RewEndModel, RewEndModelConfig
-from smol_utils import configure_opt, Dataset
+from smol_utils import configure_opt, Dataset, n_actions
 
 import wandb
 class dummy_wandb:
@@ -35,6 +35,7 @@ def main():
         depths=[2,2,2,2],
         channels=[32,32,32,32],
         attn_depths=[0,0,0,0],
+        num_actions=n_actions,
     )).to(device), device_ids=[device])
     model.train()
 
@@ -55,7 +56,7 @@ def main():
         t0 = time.perf_counter()
 
         batch = next(data_iterator)
-        loss = train_step(model, batch["obs"], batch["act"], batch["rew"], batch["end"])
+        out = train_step(model, batch["obs"], batch["act"], batch["rew"], batch["end"])
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 100.0)
         opt.step()
@@ -63,7 +64,12 @@ def main():
         lr_sched.step()
 
         log_args = {
-            "loss": loss,
+            "loss": out["loss"].item(),
+            "loss_rew": out["loss_rew"].item(),
+            "loss_end": out["loss_end"].item(),
+            "prob": out['loss'].neg().exp().item(),
+            "prob_rew": out['loss_rew'].neg().exp().item(),
+            "prob_end": out['loss_end'].neg().exp().item(),
             "grad_norm": grad_norm.item(),
             "lr": lr_sched.get_last_lr()[0],
             "seconds_per_step": time.perf_counter() - t0,
@@ -119,22 +125,29 @@ def main_proc_data_iterator():
             for trajectory_idx, start_frame_idx, end_frame_idx in yield_indices:
                 obs = trajectory_buffer[trajectory_idx]['obs'][start_frame_idx:end_frame_idx]
                 act = trajectory_buffer[trajectory_idx]['act'][start_frame_idx:end_frame_idx]
+                rew = trajectory_buffer[trajectory_idx]['rew'][start_frame_idx:end_frame_idx]
+                end = trajectory_buffer[trajectory_idx]['end'][start_frame_idx:end_frame_idx]
                 assert len(obs) == len(act)
+                assert len(obs) == len(rew)
                 assert len(obs) == chunk_size
-                yield dict(obs=obs, act=act)
+                yield dict(obs=obs, act=act, rew=rew, end=end)
 
     inner_iterator = inner()
 
     while True:
         obs = []
         act = []
+        rew = []
+        end = []
 
         for _ in range(8): # 32 single gpu, 4 for 8 gpus, 8 -> 35 for 7 gpus
             x = next(inner_iterator)
             obs.append(x["obs"].to(device))
             act.append(x['act'].to(device))
+            rew.append(x['rew'].to(device))
+            end.append(x['end'].to(device))
 
-        yield dict(obs=obs, act=act)
+        yield dict(obs=obs, act=act, rew=rew, end=end)
 
 
 def train_step(model, batch_obs, batch_act, batch_rew, batch_end):
@@ -144,7 +157,7 @@ def train_step(model, batch_obs, batch_act, batch_rew, batch_end):
 
     for x in batch_rew:
         x = x.sign().long().add(1)
-        x = torch.concat([x, torch.full((pad_to-x.shape[0],), -100)])
+        x = torch.concat([x, torch.full((pad_to-x.shape[0],), -100, device=device)])
         target_rew.append(x)
 
     target_rew = torch.stack(target_rew)
@@ -152,15 +165,15 @@ def train_step(model, batch_obs, batch_act, batch_rew, batch_end):
     target_end = []
 
     for x in batch_end:
-        x = torch.concat([x, torch.full((pad_to-x.shape[0],), -100)])
+        x = torch.concat([x, torch.full((pad_to-x.shape[0],), -100, device=device)])
         target_end.append(x)
 
     target_end = torch.stack(target_end)
 
-    batch_obs = torch.stack([torch.concat([x, torch.zeros(pad_to-x.shape[0], *x.shape[1:])]) for x in batch_obs])
-    batch_act = torch.stack([torch.concat([x, torch.zeros(pad_to-x.shape[0], *x.shape[1:])]) for x in batch_act])
-    batch_rew = torch.stack([torch.concat([x, torch.zeros(pad_to-x.shape[0], *x.shape[1:])]) for x in batch_rew])
-    batch_end = torch.stack([torch.concat([x, torch.zeros(pad_to-x.shape[0], *x.shape[1:])]) for x in batch_end])
+    batch_obs = torch.stack([torch.concat([x, torch.zeros(pad_to-x.shape[0], *x.shape[1:], device=device, dtype=x.dtype)]) for x in batch_obs])
+    batch_act = torch.stack([torch.concat([x, torch.zeros(pad_to-x.shape[0], *x.shape[1:], device=device, dtype=x.dtype)]) for x in batch_act])
+    batch_rew = torch.stack([torch.concat([x, torch.zeros(pad_to-x.shape[0], *x.shape[1:], device=device, dtype=x.dtype)]) for x in batch_rew])
+    batch_end = torch.stack([torch.concat([x, torch.zeros(pad_to-x.shape[0], *x.shape[1:], device=device, dtype=x.dtype)]) for x in batch_end])
 
     obs = batch_obs[:, :-1]
     act = batch_act[:, :-1]
@@ -168,8 +181,8 @@ def train_step(model, batch_obs, batch_act, batch_rew, batch_end):
 
     logits_rew, logits_end, _ = model(obs, act, next_obs)
 
-    loss_rew = F.cross_entropy(logits_rew.flatten(), target_rew[:-1].flatten())
-    loss_end = F.cross_entropy(logits_end.flatten(), target_end[:-1].flatten())
+    loss_rew = F.cross_entropy(logits_rew.reshape(-1, logits_rew.shape[-1]), target_rew[:, :-1].flatten())
+    loss_end = F.cross_entropy(logits_end.reshape(-1, logits_end.shape[-1]), target_end[:, :-1].flatten())
     loss = loss_rew + loss_end
     loss.backward()
 
