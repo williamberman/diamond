@@ -21,6 +21,8 @@ from functools import partial
 from pathlib import Path
 from torch.utils.data import DataLoader
 from data import BatchSampler
+from coroutines.collector import make_collector, NumToCollect
+import time
 
 import wandb
 class dummy_wandb:
@@ -42,7 +44,7 @@ def main():
     if device == 0:
         wandb.init(project="actor_critic")
 
-    model = DDP(ActorCritic(ActorCriticConfig(
+    actor_critic = DDP(ActorCritic(ActorCriticConfig(
         lstm_dim=512,
         img_channels=3,
         img_size=64,
@@ -50,25 +52,25 @@ def main():
         down=[1,1,1,1],
         num_actions=n_actions,
     )).to(device), device_ids=[device])
-    model.train()
+    actor_critic.train()
 
     ckpts = sorted([int(x.split('.')[0].split('_')[-1]) for x in os.listdir(dir) if x.endswith(".pt")])
     if len(ckpts) > 0:
         step = ckpts[-1]
         sd = torch.load(os.path.join(dir, f"actor_critic_{step}.pt"), map_location=torch.device(f"cuda:{device}"), weights_only=True)
-        model.load_state_dict(sd, strict=True)
+        actor_critic.load_state_dict(sd, strict=True)
     else:
         step = 0
 
-    opt = configure_opt(model, lr=1e-4, weight_decay=0, eps=1e-8)
+    opt = configure_opt(actor_critic, lr=1e-4, weight_decay=0, eps=1e-8)
     lr_sched = LambdaLR(opt, lambda s: 1 if s >= 100 else s / 100)
 
     if train_on_world_model:
-        env = make_world_model_env()
+        env = make_world_model_env(actor_critic.module)
     else:
-        env = make_atari_env("ALE/SpaceInvaders-v5", 1, device, True, 64, None)
+        env = make_real_env()
 
-    model.module.setup_training(env, ActorCriticLossConfig(
+    actor_critic.module.setup_training(env, ActorCriticLossConfig(
         backup_every=15,
         gamma=0.985,
         lambda_=0.95,
@@ -77,8 +79,10 @@ def main():
     ))
 
     while True:
-        out = train_step(model)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 100.0)
+        t0 = time.perf_counter()
+
+        out = train_step(actor_critic)
+        grad_norm = torch.nn.utils.clip_grad_norm_(actor_critic.parameters(), 100.0)
         opt.step()
         opt.zero_grad()
         lr_sched.step()
@@ -88,6 +92,11 @@ def main():
             loss_actions=out["loss_actions"],
             loss_entropy=out["loss_entropy"],
             loss_values=out["loss_values"],
+            grad_norm=grad_norm.item(),
+            lr=lr_sched.get_last_lr()[0],
+            seconds_per_step=time.perf_counter() - t0,
+            steps_per_second=1 / (time.perf_counter() - t0),
+            steps_per_hour=3600 / (time.perf_counter() - t0),
         )
 
         if device == 0:
@@ -95,14 +104,17 @@ def main():
             wandb.log(log_args, step=step)
 
         if device == 0 and (step + 1) % 5_000 == 0:
-            torch.save(model.state_dict(), os.path.join(dir, f"actor_critic_{step+1}.pt"))
-            validation(model, step+1)
+            torch.save(actor_critic.state_dict(), os.path.join(dir, f"actor_critic_{step+1}.pt"))
+            validation(actor_critic, step+1)
 
         torch.distributed.barrier()
 
         step += 1
 
-def make_world_model_env():
+def make_real_env():
+    return make_atari_env("ALE/SpaceInvaders-v5", 1, device, True, 64, None)
+
+def make_world_model_env(actor_critic):
     num_steps_conditioning = 16
 
     denoiser = Denoiser(DenoiserConfig(
@@ -155,6 +167,9 @@ def make_world_model_env():
     )
     bs = BatchSampler(train_dataset, 32, num_steps_conditioning, [0.1, 0.1, 0.1, 0.7])
     data_loader = make_data_loader(batch_sampler=bs)
+
+    collector = make_collector(make_real_env(), actor_critic, train_dataset, 0.01)
+    collector.send(NumToCollect(steps=10_000))
 
     env = WorldModelEnv(denoiser, rew_end_model, data_loader, WorldModelEnvConfig(
         horizon=15,
