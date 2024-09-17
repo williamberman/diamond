@@ -7,11 +7,21 @@ from smol_utils import n_actions, configure_opt
 from torch.distributions import Categorical
 import torch.nn.functional as F
 from models.actor_critic import compute_lambda_returns
-from envs.env import make_atari_env
 from torch.optim.lr_scheduler import LambdaLR
 from coroutines.env_loop import make_env_loop
 from PIL import Image
 import imageio
+from envs import WorldModelEnv, make_atari_env, WorldModelEnvConfig
+from models.diffusion import DiffusionSamplerConfig
+from models.rew_end_model import RewEndModel, RewEndModelConfig
+from models.diffusion.denoiser import Denoiser, DenoiserConfig, InnerModelConfig
+from models.diffusion import SigmaDistributionConfig
+from data import collate_segments_to_batch, Dataset
+from functools import partial
+from pathlib import Path
+from torch.utils.data import DataLoader
+from data import BatchSampler
+
 import wandb
 class dummy_wandb:
     def init(*args, **kwargs): pass
@@ -20,17 +30,17 @@ wandb = dummy_wandb()
 
 device = int(os.environ['LOCAL_RANK'])
 
-dir = "/mnt/raid/diamond/spaceinvaders/actor_critic"
+dir = "/mnt/raid/diamond/spaceinvaders/actor_critic_trained_on_world_model"
 if device == 0:
     os.makedirs(dir, exist_ok=True)
+
+train_on_world_model = True
 
 def main():
     torch.distributed.init_process_group(backend="nccl")
 
     if device == 0:
         wandb.init(project="actor_critic")
-
-    env = make_atari_env("ALE/SpaceInvaders-v5", 1, device, True, 64, None)
 
     model = DDP(ActorCritic(ActorCriticConfig(
         lstm_dim=512,
@@ -40,13 +50,6 @@ def main():
         down=[1,1,1,1],
         num_actions=n_actions,
     )).to(device), device_ids=[device])
-    model.module.setup_training(env, ActorCriticLossConfig(
-        backup_every=15,
-        gamma=0.985,
-        lambda_=0.95,
-        weight_value_loss=1.0,
-        weight_entropy_loss=0.001,
-    ))
     model.train()
 
     ckpts = sorted([int(x.split('.')[0].split('_')[-1]) for x in os.listdir(dir) if x.endswith(".pt")])
@@ -59,6 +62,19 @@ def main():
 
     opt = configure_opt(model, lr=1e-4, weight_decay=0, eps=1e-8)
     lr_sched = LambdaLR(opt, lambda s: 1 if s >= 100 else s / 100)
+
+    if train_on_world_model:
+        env = make_world_model_env()
+    else:
+        env = make_atari_env("ALE/SpaceInvaders-v5", 1, device, True, 64, None)
+
+    model.module.setup_training(env, ActorCriticLossConfig(
+        backup_every=15,
+        gamma=0.985,
+        lambda_=0.95,
+        weight_value_loss=1.0,
+        weight_entropy_loss=0.001,
+    ))
 
     while True:
         out = train_step(model)
@@ -85,6 +101,97 @@ def main():
         torch.distributed.barrier()
 
         step += 1
+
+def make_world_model_env():
+    num_steps_conditioning = 16
+
+    denoiser = Denoiser(DenoiserConfig(
+        inner_model=InnerModelConfig(
+            img_channels=3,
+            num_steps_conditioning=num_steps_conditioning, 
+            cond_channels=256,
+            depths=[2,2,2,2],
+            channels=[64, 64, 64, 64],
+            attn_depths=[0, 0, 0, 0],
+            num_actions=n_actions,
+        ),
+        sigma_data=0.5,
+        sigma_offset_noise=0.3,
+    )).to(device)
+    denoiser.setup_training(SigmaDistributionConfig(
+        loc=-0.4,
+        scale=1.2,
+        sigma_min=2e-3,
+        sigma_max=20,
+    ))
+    denoiser.eval()
+
+    denoiser_state_dict = torch.load("/mnt/raid/diamond/spaceinvaders/denoiser/denoiser_275000.pt", map_location="cpu", weights_only=True)
+    denoiser_state_dict = {k.replace("module.", ""): v for k, v in denoiser_state_dict.items()}
+    denoiser.load_state_dict(denoiser_state_dict, strict=True)
+
+    rew_end_model = RewEndModel(RewEndModelConfig(
+        lstm_dim=512,
+        img_channels=3,
+        img_size=64,
+        cond_channels=128,
+        depths=[2,2,2,2],
+        channels=[32,32,32,32],
+        attn_depths=[0,0,0,0],
+        num_actions=n_actions,
+    )).to(device)
+    rew_end_model.eval()
+
+    # rew_end_model_state_dict = torch.load("/mnt/raid/diamond/spaceinvaders/rew_end_model/rew_end_model_100000.pt", map_location="cpu", weights_only=True)
+    # rew_end_model_state_dict = {k.replace("module.", ""): v for k, v in rew_end_model_state_dict.items()}
+    # rew_end_model.load_state_dict(rew_end_model_state_dict, strict=True)
+
+    train_dataset = Dataset(Path("dataset") / "train", "train_dataset", False, False)
+    make_data_loader = partial(
+        DataLoader,
+        dataset=train_dataset,
+        collate_fn=collate_segments_to_batch,
+        num_workers=0,
+    )
+    bs = BatchSampler(train_dataset, 32, num_steps_conditioning, [0.1, 0.1, 0.1, 0.7])
+    data_loader = make_data_loader(batch_sampler=bs)
+
+    env = WorldModelEnv(denoiser, rew_end_model, data_loader, WorldModelEnvConfig(
+        horizon=15,
+        num_batches_to_preload=256,
+        diffusion_sampler=DiffusionSamplerConfig(
+            num_steps_denoising=3,
+            sigma_min=2e-3,
+            sigma_max=5.0,
+            rho=7,
+            order=1,  # 1: Euler, 2: Heun
+            s_churn=0.0,  # Amount of stochasticity
+            s_tmin=0.0,
+            s_tmax=float("inf"),
+            s_noise=1.0
+        )
+    ))
+
+    return env
+
+def train_step(model):
+    c = model.module.loss_cfg
+    _, act, rew, end, trunc, logits_act, val, val_bootstrap, _ = model.module.env_loop.send(c.backup_every)
+
+    d = Categorical(logits=logits_act)
+    entropy = d.entropy().mean()
+
+    lambda_returns = compute_lambda_returns(rew, end, trunc, val_bootstrap, c.gamma, c.lambda_)
+
+    loss_actions = (-d.log_prob(act) * (lambda_returns - val).detach()).mean()
+    loss_values = c.weight_value_loss * F.mse_loss(val, lambda_returns)
+    loss_entropy = -c.weight_entropy_loss * entropy
+
+    loss = loss_actions + loss_entropy + loss_values
+
+    loss.backward()
+
+    return dict(loss=loss.item(), loss_actions=loss_actions.item(), loss_entropy=loss_entropy.item(), loss_values=loss_values.item())
 
 @torch.no_grad()
 def validation(model, step):
@@ -123,24 +230,6 @@ def validation(model, step):
 
     model.train()
 
-def train_step(model):
-    c = model.module.loss_cfg
-    _, act, rew, end, trunc, logits_act, val, val_bootstrap, _ = model.module.env_loop.send(c.backup_every)
-
-    d = Categorical(logits=logits_act)
-    entropy = d.entropy().mean()
-
-    lambda_returns = compute_lambda_returns(rew, end, trunc, val_bootstrap, c.gamma, c.lambda_)
-
-    loss_actions = (-d.log_prob(act) * (lambda_returns - val).detach()).mean()
-    loss_values = c.weight_value_loss * F.mse_loss(val, lambda_returns)
-    loss_entropy = -c.weight_entropy_loss * entropy
-
-    loss = loss_actions + loss_entropy + loss_values
-
-    loss.backward()
-
-    return dict(loss=loss.item(), loss_actions=loss_actions.item(), loss_entropy=loss_entropy.item(), loss_values=loss_values.item())
 
 if __name__ == "__main__":
     main()
