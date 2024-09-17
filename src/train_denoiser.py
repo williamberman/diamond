@@ -34,7 +34,8 @@ class dummy_wandb:
 device = int(os.environ['LOCAL_RANK'])
 
 dir = "/mnt/raid/diamond/spaceinvaders/denoiser"
-os.makedirs(dir, exist_ok=True)
+if device == 0:
+    os.makedirs(dir, exist_ok=True)
 
 use_labeled_actions = False
 
