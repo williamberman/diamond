@@ -28,9 +28,8 @@ def preprocess_data(df):
     return df
 
 class StateActionDataset(Dataset):
-    def __init__(self, df, transform=None, use_delta=False):
+    def __init__(self, df, use_delta=False):
         self.df = df
-        self.transform = transform
         self.use_delta = use_delta
 
     def __len__(self):
@@ -41,9 +40,14 @@ class StateActionDataset(Dataset):
         next_state = self.df.iloc[idx]['next_state_img']
         action = self.df.iloc[idx]['action']
 
-        if self.transform:
-            state = self.transform(state)
-            next_state = self.transform(next_state)
+        labeler_mean = torch.tensor([0.485, 0.456, 0.406])[:, None, None]
+        labeler_std = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
+
+        state = torch.tensor(np.array(state.resize((64, 64))))
+        next_state = torch.tensor(np.array(next_state.resize((64, 64))))
+
+        state = state.permute(2, 0, 1).float().div(255).sub(labeler_mean).div(labeler_std)
+        next_state = next_state.permute(2, 0, 1).float().div(255).sub(labeler_mean).div(labeler_std)
 
         if self.use_delta:
             delta = next_state - state
@@ -148,25 +152,24 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, schedule
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
             total_train_loss += loss.item()
             if step % 100 == 0:
-                print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, Train Loss: {loss.item():.4f}')
+                print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, Train Loss: {loss.item():.4f} grad_norm: {grad_norm.item():.4f}')
 
-            if step % eval_interval == 0 or step == steps_per_epoch:
-                test_loss, test_accuracy = evaluate_model(model, test_loader, criterion, device)
-                print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, '
-                      f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%')
-                model.train()  # Switch back to training mode
+        test_loss, test_accuracy = evaluate_model(model, test_loader, criterion, device)
+        print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, '
+              f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%')
+        model.train()  # Switch back to training mode
 
         avg_train_loss = total_train_loss / steps_per_epoch
         print(f'Epoch {epoch+1}/{num_epochs} completed, Average Train Loss: {avg_train_loss:.4f}')
     
         torch.save(model.state_dict(), f"smol_conv_classifier_{epoch+1}.pt")
         
-        scheduler.step()  # Step the learning rate scheduler
+        # scheduler.step()  # Step the learning rate scheduler
 
     torch.save(model.state_dict(), f"smol_conv_classifier_final.pt")
 
@@ -183,24 +186,12 @@ def main(args):
     original_img_size = df['state_img'].iloc[0].size
     print(f"Original image size: {original_img_size}")
 
-    # Keep aspect ratio
-    aspect_ratio = original_img_size[0] / original_img_size[1]
-    new_height = args.image_size
-    new_width = int(new_height * aspect_ratio)
-
-    # Use standard normalization values
-    transform = transforms.Compose([
-        transforms.Resize((new_height, new_width)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-
     train_df, test_df = train_test_split(df, test_size=0.05, random_state=42)
 
-    train_dataset = StateActionDataset(train_df, transform=transform, use_delta=args.use_delta)
-    test_dataset = StateActionDataset(test_df, transform=transform, use_delta=args.use_delta)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    train_dataset = StateActionDataset(train_df, use_delta=args.use_delta)
+    test_dataset = StateActionDataset(test_df, use_delta=args.use_delta)
+    train_loader = DataLoader(train_dataset, num_workers=args.batch_size, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, num_workers=0, batch_size=args.batch_size, shuffle=False)
 
     num_classes = df['action'].nunique()
     input_channels = 3 if args.use_delta else 6
@@ -208,9 +199,9 @@ def main(args):
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+    # scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 
-    train_model(model, train_loader, test_loader, criterion, optimizer, scheduler, args.epochs, device)
+    train_model(model, train_loader, test_loader, criterion, optimizer, None, args.epochs, device)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train an image classifier for state-action prediction")
@@ -219,7 +210,7 @@ if __name__ == "__main__":
     parser.add_argument("--image_size", type=int, default=160, help="Height to resize images to (width will be adjusted to maintain aspect ratio)")
     parser.add_argument("--use_delta", action="store_true", help="Include delta between state and next_state as input")
     parser.add_argument("--epochs", type=int, default=20, help="Number of epochs to train")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--gpu", type=int, default=7, help="GPU ID to use (default: None, use CPU)")
     args = parser.parse_args()
     args.use_delta = True
