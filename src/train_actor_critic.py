@@ -103,7 +103,7 @@ def main():
             print(f"step {step} {log_args}")
             wandb.log(log_args, step=step)
 
-        if device == 0 and (step + 1) % 5_000 == 0:
+        if device == 0 and (step + 1) % 1_000 == 0:
             torch.save(actor_critic.state_dict(), os.path.join(dir, f"actor_critic_{step+1}.pt"))
             validation(actor_critic, step+1)
 
