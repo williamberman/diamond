@@ -14,7 +14,6 @@ import numpy as np
 import tqdm
 import random
 from smol_conv_classifier import ImprovedCNN
-import torch.multiprocessing as mp
 from smol_utils import make_env, n_actions, configure_opt, process_will_agent_input, load_random_agent, Dataset
 
 import wandb
@@ -33,8 +32,6 @@ use_labeled_actions = False
 context_len = 16 # 4 orig, # 8/9 frames is the distance over which the enemies move in space invaders
 
 def main():
-    mp.set_start_method("spawn") # we use cuda in the dataloader
-
     torch.distributed.init_process_group(backend="nccl")
 
     if device == 0:
