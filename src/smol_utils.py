@@ -8,6 +8,9 @@ from torch.distributions import Categorical
 import torch
 import numpy as np
 import cv2
+import random
+import os
+import time
 
 def make_env():
     # return make_atari_env("BreakoutNoFrameskip-v4", 64, None)
@@ -119,3 +122,65 @@ class WillAgent(nn.Module):
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+
+class Dataset(torch.utils.data.IterableDataset):
+    @torch.no_grad()
+    def __iter__(self):
+        env = make_env()
+        agent = load_random_agent()
+        trajectory_ctr = 0
+
+        trajectory_buffer = []
+
+        while True:
+            t0 = time.perf_counter()
+
+            if (trajectory_ctr+1) % 200 == 0:
+                agent = load_random_agent()
+
+            obs = [] 
+            act = [] 
+
+            def get_action():
+                if len(obs) < 4:
+                    return torch.tensor(random.randint(0, n_actions-1))
+                else:
+                    return agent.get_action_and_value(process_will_agent_input(obs[-4:]))[0].squeeze(0)
+
+            state, _ = env.reset()
+
+            obs.append(state)
+            act.append(get_action())
+
+            while True:
+                next_obs, reward, terminated, truncated, info = env.step(act[-1])
+
+                obs.append(next_obs)
+                act.append(get_action())
+
+                if terminated or truncated:
+                    break
+            
+            act = torch.stack(act)
+
+            obs = torch.stack([torch.tensor(o).div(255).mul(2).sub(1).permute(2, 0, 1) for o in obs])
+
+            trajectory_buffer.append(dict(obs=obs, act=act))
+
+            if len(trajectory_buffer) == 10:
+                yield trajectory_buffer
+                trajectory_buffer.clear()
+
+            trajectory_ctr += 1
+            # print(f"Collected {trajectory_ctr} trajectories. trajectory_buffer: {len(trajectory_buffer)} time: {time.perf_counter() - t0} steps in trajectory: {obs.shape[0]}")
+
+def load_random_agent(device="cpu"):
+    policy_dir = "/mnt/raid/orca_rl/ppo_space_invaders/"
+    policy = random.choice([x for x in os.listdir(policy_dir) if x.endswith('.pt')])
+    policy_path = os.path.join(policy_dir, policy)
+    print(f"Loading policy: {policy_path}")
+    agent = WillAgent().to(device)
+    agent.load_state_dict(torch.load(policy_path, map_location=device, weights_only=True))
+    agent.eval()
+    # print(f"Loaded policy: {policy_path}")
+    return agent

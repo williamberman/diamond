@@ -15,7 +15,7 @@ import tqdm
 import random
 from smol_conv_classifier import ImprovedCNN
 import torch.multiprocessing as mp
-from smol_utils import make_env, n_actions, WillAgent, configure_opt, process_will_agent_input
+from smol_utils import make_env, n_actions, configure_opt, process_will_agent_input, load_random_agent, Dataset
 
 import wandb
 class dummy_wandb:
@@ -124,16 +124,27 @@ def main_proc_data_iterator():
         prefetch_factor=2,
     ))
 
+    if use_labeled_actions:
+        action_labeler = ImprovedCNN(n_actions, 3).to(device)
+        action_labeler.load_state_dict(torch.load("smol_conv_classifier_final.pt", map_location=device, weights_only=True))
+        action_labeler.eval()
+
+        labeler_mean = torch.tensor([0.485, 0.456, 0.406], device=device)[None, :, None, None]
+        labeler_std = torch.tensor([0.229, 0.224, 0.225], device=device)[None, :, None, None]
+
     def inner():
         while True:
             trajectory_buffer = next(data_loader)
             assert len(trajectory_buffer) == 1
             trajectory_buffer = trajectory_buffer[0]
 
+            if use_labeled_actions:
+                assert False, "TODO bring code back"
+
             yield_indices = []
 
             for trajectory_idx in range(len(trajectory_buffer)):
-                trajectory = trajectory_buffer[trajectory_idx][0]
+                trajectory = trajectory_buffer[trajectory_idx]['obs']
 
                 for start_frame_idx in range(0, trajectory.shape[0]-chunk_size):
                     end_frame_idx = start_frame_idx+chunk_size
@@ -142,9 +153,8 @@ def main_proc_data_iterator():
             random.shuffle(yield_indices)
 
             for trajectory_idx, start_frame_idx, end_frame_idx in yield_indices:
-                obs, act = trajectory_buffer[trajectory_idx]
-                obs = obs[start_frame_idx:end_frame_idx]
-                act = act[start_frame_idx:end_frame_idx]
+                obs = trajectory_buffer[trajectory_idx]['obs'][start_frame_idx:end_frame_idx]
+                act = trajectory_buffer[trajectory_idx]['act'][start_frame_idx:end_frame_idx]
                 assert len(obs) == len(act)
                 assert len(obs) == chunk_size
                 yield dict(obs=obs, act=act)
@@ -161,76 +171,6 @@ def main_proc_data_iterator():
             act.append(x['act'].to(device))
 
         yield dict(obs=obs, act=act)
-
-class Dataset(torch.utils.data.IterableDataset):
-    @torch.no_grad()
-    def __iter__(self):
-        env = make_env()
-        agent = load_random_agent()
-        trajectory_ctr = 0
-
-        trajectory_buffer = []
-
-        if use_labeled_actions:
-            action_labeler = ImprovedCNN(n_actions, 3).to(device)
-            action_labeler.load_state_dict(torch.load("smol_conv_classifier_final.pt", map_location="cpu", weights_only=True))
-            action_labeler.eval()
-
-            labeler_mean = torch.tensor([0.485, 0.456, 0.406], device=device)[None, :, None, None]
-            labeler_std = torch.tensor([0.229, 0.224, 0.225], device=device)[None, :, None, None]
-
-        while True:
-            t0 = time.perf_counter()
-
-            if (trajectory_ctr+1) % 200 == 0:
-                agent = load_random_agent()
-
-            obs = [] 
-            act = [] 
-
-            state, _ = env.reset()
-
-            obs.append(state)
-            act.append(get_action(agent, obs))
-
-            while True:
-                next_obs, reward, terminated, truncated, info = env.step(act[-1])
-
-                obs.append(next_obs)
-                act.append(get_action(agent, obs))
-
-                if terminated or truncated:
-                    break
-            
-            if use_labeled_actions:
-                obs_ = []
-                next_obs_ = []
-
-                for i in range(len(obs)-1):
-                    obs_.append(torch.tensor(obs[i]))
-                    next_obs_.append(torch.tensor(obs[i+1]))
-
-                obs_ = torch.stack(obs_).to(device).permute(0, 3, 1, 2).float().div(255).sub(labeler_mean).div(labeler_std)
-                next_obs_ = torch.stack(next_obs_).to(device).permute(0, 3, 1, 2).float().div(255).sub(labeler_mean).div(labeler_std)
-                deltas = next_obs_ - obs_
-
-                labeled_act = action_labeler(deltas).argmax(dim=1).to('cpu')
-                labeled_act = torch.concat([labeled_act, act[-1].unsqueeze(0)])
-                assert len(labeled_act) == len(obs)
-                act = labeled_act
-            else:
-                act = torch.stack(act)
-
-            obs = torch.stack([torch.tensor(o).div(255).mul(2).sub(1).permute(2, 0, 1) for o in obs])
-
-            trajectory_buffer.append((obs, act))
-
-            if len(trajectory_buffer) == 10:
-                yield trajectory_buffer
-                trajectory_buffer.clear()
-
-            trajectory_ctr += 1
-            # print(f"Collected {trajectory_ctr} trajectories. trajectory_buffer: {len(trajectory_buffer)} time: {time.perf_counter() - t0} steps in trajectory: {obs.shape[0]}")
 
 def train_step(denoiser, batch_obs, batch_act) -> ComputeLossOutput:
     n = denoiser.module.cfg.inner_model.num_steps_conditioning
@@ -303,14 +243,21 @@ def validation(denoiser, step, n_videos):
         env = make_env()
         state, _ = env.reset()
         state = [state]
-        act = [get_action(agent, state)]
+
+        def get_action():
+            if len(state) < 4:
+                return torch.tensor(random.randint(0, n_actions-1))
+            else:
+                return agent.get_action_and_value(process_will_agent_input(state[-4:]))[0].squeeze(0)
+
+        act = [get_action()]
 
         n_init_steps = random.randint(context_len, 60)
 
         for _ in range(n_init_steps):
             next_obs, _, _, _, _ = env.step(act[-1])
             state.append(next_obs)
-            act.append(get_action(agent, state))
+            act.append(get_action())
 
         state = [torch.tensor(x).div(255).mul(2).sub(1).permute(2, 0, 1) for x in state]
         state = torch.stack(state).unsqueeze(0).to(device)
@@ -347,25 +294,6 @@ def validation(denoiser, step, n_videos):
     denoiser.train()
 
     return all_wandb_frames, all_paths
-
-def get_action(agent, obs):
-    if len(obs) < 4:
-        return torch.tensor(random.randint(0, n_actions-1), device='cpu')
-    agent_device = next(agent.parameters()).device
-    agent_inp = process_will_agent_input(obs[-4:]).to(agent_device)
-    action, _, _, _ = agent.get_action_and_value(agent_inp)
-    return action.squeeze(0).to('cpu')
-
-def load_random_agent(device="cpu"):
-    policy_dir = "/mnt/raid/orca_rl/ppo_space_invaders/"
-    policy = random.choice([x for x in os.listdir(policy_dir) if x.endswith('.pt')])
-    policy_path = os.path.join(policy_dir, policy)
-    print(f"Loading policy: {policy_path}")
-    agent = WillAgent().to(device)
-    agent.load_state_dict(torch.load(policy_path, map_location=device, weights_only=True))
-    agent.eval()
-    # print(f"Loaded policy: {policy_path}")
-    return agent
 
 if __name__ == "__main__":
     main()
