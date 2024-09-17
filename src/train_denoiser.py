@@ -99,7 +99,7 @@ def main():
 
         if device == 0 and (step+1) % 15_000 == 0:
         # if device == 0 and (step+1) % 5_000 == 0:
-            # torch.save(denoiser.state_dict(), os.path.join(dir, f"denoiser_{step+1}.pt"))
+            torch.save(denoiser.state_dict(), os.path.join(dir, f"denoiser_{step+1}.pt"))
             vid_frames, vid_paths = validation(denoiser, step+1, 5)
             wandb.log({"video": [wandb.Video(x, format='mp4') for x in vid_paths]}, step=step+1)
 
