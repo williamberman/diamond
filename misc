@@ -41,5 +41,15 @@ python src/play.py \
 ```
 
 ```bash
+python src/play.py \
+ --path-ckpt /Users/williamberman/Downloads/agent_epoch_00004.pt \
+ --game Breakout \
+ --headless-collect-n 4 \
+ --headless-collect-n-threads 2 \
+ --default-env test \
+ --write-rewards ./reward_data/breakout_rewards.json
+```
+
+```bash
 python src/compute_atari_100k.py --dir-for-my-scores ./reward_data
 ```

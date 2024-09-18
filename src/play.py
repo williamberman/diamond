@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--path-ckpt", type=str, default=None, help="Path to the checkpoint.")
     parser.add_argument("--horizon", type=int, default=50, help="Horizon for the world model environment.")
     parser.add_argument("--write-rewards", type=str, default=None, help="Path to write rewards.")
+    parser.add_argument("--headless-collect-n-threads", type=int, default=20, help="Number of threads to collect in headless mode.")
     return parser.parse_args()
 
 
@@ -198,7 +199,7 @@ def main():
         print(f"Collecting {args.headless_collect_n} episodes in headless mode.")
         assert not args.dataset_mode
 
-        n_threads = 20
+        n_threads = args.headless_collect_n_threads
         n_per_thread = math.ceil(args.headless_collect_n / n_threads)
 
         pbar = tqdm.tqdm(total=n_threads * n_per_thread)
