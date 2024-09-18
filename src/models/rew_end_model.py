@@ -71,7 +71,7 @@ class RewEndModel(nn.Module):
         logits_rew, logits_end, _ = self(obs, act, next_obs)
         logits_rew = logits_rew[mask]
         logits_end = logits_end[mask]
-        target_rew = rew[mask].sign().long().add(1)  # clipped to {-1, 0, 1}
+        target_rew = rew[mask].sign().long().add(1) # clipped to {-1, 0, 1}
         target_end = end[mask]
 
         loss_rew = F.cross_entropy(logits_rew, target_rew)
@@ -126,6 +126,9 @@ class RewEndEncoder(nn.Module):
         self.downsamples = nn.ModuleList([nn.Identity()] + [Downsample(c) for c in channels[:-1]] + [nn.Identity()])
 
     def forward(self, x: Tensor, cond: Tensor) -> Tensor:
+        dtype = self.conv_in.weight.dtype
+        x = x.to(dtype)
+        cond = cond.to(dtype)
         x = self.conv_in(x)
         for block, down in zip(self.blocks, self.downsamples):
             x = down(x)

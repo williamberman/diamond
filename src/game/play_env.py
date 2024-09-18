@@ -1,5 +1,6 @@
 from collections import defaultdict, namedtuple
 import math
+import random
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -27,6 +28,8 @@ class PlayEnv:
         recording_mode: bool,
         store_denoising_trajectory: bool,
         store_original_obs: bool,
+        store_final_obs: bool,
+        recording_dir: str=None
     ) -> None:
         self.agent = agent
         self.envs = envs
@@ -35,10 +38,12 @@ class PlayEnv:
         self.recording_mode = recording_mode
         self.store_denoising_trajectory = store_denoising_trajectory
         self.store_original_obs = store_original_obs
+        self.store_final_obs = store_final_obs
         self.is_human_player = False
         self.env_id = 0
         self.env_name, self.env = self.envs[0]
         self.obs, self.t, self.return_, self.hx_cx, self.ckpt_id, self.buffer, self.rec_dataset = (None,) * 7
+        self.recording_dir = recording_dir
 
     def print_controls(self) -> None:
         print("\nControls (play mode):\n")
@@ -97,7 +102,10 @@ class PlayEnv:
     def reset_recording(self) -> None:
         self.buffer = defaultdict(list)
         self.buffer["info"] = defaultdict(list)
-        dir = Path("dataset") / f"rec_{self.env_name}_{'H' if self.is_human_player else 'π'}"
+        if self.recording_dir is not None:
+            dir = Path(self.recording_dir)
+        else:
+            dir = Path("dataset") / f"rec_{self.env_name}_{'H' if self.is_human_player else 'π'}"
         self.rec_dataset = Dataset(dir)
         self.rec_dataset.load_from_default_path()
 
@@ -109,13 +117,17 @@ class PlayEnv:
         return self.obs, None
 
     @torch.no_grad()
-    def step(self, act: int) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Any]]:
+    def step(self, act: int, eps=None, on_last_life=None) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Any]]:
         if self.is_human_player:
+            assert eps is None
             act = torch.tensor([act], device=self.agent.device)
         else:
             logits_act, value, self.hx_cx = self.agent.actor_critic(self.obs, self.hx_cx)
             dst = torch.distributions.categorical.Categorical(logits=logits_act)
-            act = dst.sample()
+            if eps is not None and random.random() < eps:
+                act = torch.tensor([random.randint(0, logits_act.shape[-1] - 1)], device=logits_act.device)
+            else:
+                act = dst.sample()
             entropy = dst.entropy() / math.log(2)
         entropy = None if self.is_human_player else f"{entropy.item():.2f}"
         value = None if self.is_human_player else f"{value.item():.2f}"
@@ -143,6 +155,8 @@ class PlayEnv:
             ],
         ]
         info = {"header": header}
+        if "lives" in env_info:
+            info["lives"] = env_info["lives"]
 
         if end or trunc:
             d = "Dead" if end else ("Horizon" if self.is_wm_env() else "Timed out")
@@ -156,14 +170,22 @@ class PlayEnv:
             if self.store_original_obs and "original_obs" in env_info:
                 original_obs = (torch.tensor(env_info["original_obs"][0]).permute(2, 0, 1).unsqueeze(0).contiguous())
                 self.buffer["info"]["original_obs"].append(original_obs)
-            if end or trunc:
-                ep_dict = {k: torch.cat(v, dim=0) for k, v in self.buffer.items() if k != "info"}
-                ep_info = {k: torch.cat(v, dim=0) for k, v in self.buffer["info"].items()}
-                ep = Episode(**ep_dict, info=ep_info).to("cpu")
-                self.rec_dataset.add_episode(ep)
-                self.rec_dataset.save_to_default_path()
-
+            if self.store_final_obs and "final_observation" in env_info:
+                self.buffer["info"]["final_observation"] = [env_info["final_observation"].squeeze(0).contiguous().to('cpu')]
+            if on_last_life is not None:
+                if on_last_life and (end or trunc):
+                    self.add_cur_episode_to_dataset()
+            else:
+                if end or trunc:
+                    self.add_cur_episode_to_dataset()
         self.obs = next_obs
         self.t += 1
 
         return next_obs, rew, end, trunc, info
+
+    def add_cur_episode_to_dataset(self):
+        ep_dict = {k: torch.cat(v, dim=0) for k, v in self.buffer.items() if k != "info"}
+        ep_info = {k: torch.cat(v, dim=0) for k, v in self.buffer["info"].items()}
+        ep = Episode(**ep_dict, info=ep_info).to("cpu")
+        self.rec_dataset.add_episode(ep)
+        self.rec_dataset.save_to_default_path()

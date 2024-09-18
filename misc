@@ -1,0 +1,194 @@
+docker run -it --gpus all --ipc=host -v /mnt/raid:/mnt/raid -v "$(pwd)":/workspace pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime bash
+
+docker run -it --gpus all --ipc=host -v /home/tiny/fake_raid:/mnt/raid -v "$(pwd)":/workspace pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime bash
+
+apt-get update && apt-get install ffmpeg libsm6 libxext6 git build-essential -y && pip install -r requirements.txt
+
+python src/play.py --pretrained --record --recording-dir ./breakout_recordings --default-env test --game 7 --headless-collect-n-episodes 1000
+python src/train_action_labeler.py --data_dir ./breakout_recordings/
+python src/main.py env.train.id=BreakoutNoFrameskip-v4 common.device=cuda:0
+
+python src/play.py --pretrained --record --recording-dir ./pong_recordings --default-env test --game 20 --headless-collect-n-episodes 400 --device cuda:1
+python src/train_action_labeler.py --data_dir ./pong_recordings/ --device cuda:1
+python src/main.py env.train.id=PongNoFrameskip-v4 common.device=cuda:1
+
+./run.sh Breakout 0
+docker exec -it brave_beaver bash -c "./run.sh Pong 1"
+docker exec -it brave_beaver bash -c "./run.sh Alien 2"
+docker exec -it brave_beaver bash -c "./run.sh Amidar 3"
+docker exec -it brave_beaver bash -c "./run.sh Assault 4"
+docker exec -it brave_beaver bash -c "./run.sh Asterix 5"
+docker exec -it brave_beaver bash -c "./run.sh BankHeist 6"
+docker exec -it brave_beaver bash -c "./run.sh BattleZone 7"
+
+# To watch/play a pretrained agent
+python src/play.py --path-ckpt /Users/williamberman/Downloads/agent_epoch_00001.pt --horizon 100 --game Pong
+python src/play.py --path-ckpt /Users/williamberman/Downloads/agent_epoch_00004.pt --horizon 100 --game Breakout
+
+# To collect reward data for a pretrained agent
+```bash
+python src/play.py \
+ --path-ckpt /Users/williamberman/Downloads/agent_epoch_00001.pt \
+ --game Pong \
+ --headless-collect-n-episodes 100 \
+ --default-env test \
+ --write-rewards ./reward_data/pong_rewards.json
+```
+```bash
+python src/play.py \
+ --path-ckpt /Users/williamberman/Downloads/agent_epoch_00004.pt \
+ --game Breakout \
+ --headless-collect-n-episodes 100 \
+ --default-env test \
+ --write-rewards ./reward_data/breakout_rewards.json
+```
+
+```bash
+python src/play.py \
+ --path-ckpt /Users/williamberman/Downloads/agent_epoch_00004.pt \
+ --game Breakout \
+ --headless-collect-n-episodes 4 \
+ --headless-collect-n-episodes-threads 2 \
+ --default-env test \
+ --write-rewards ./reward_data/breakout_rewards.json
+```
+
+```bash
+python src/compute_atari_100k.py --dir-for-my-scores ./reward_data
+```
+
+```bash
+python src/play.py \
+--pretrained \
+--record \
+--recording-dir /mnt/raid/diamond/better4/Breakout_recordings_100k \
+--game Breakout \
+--headless-collect-n-steps 100000 \
+--eps 0.1 \
+--store-final-obs
+
+# 60%
+python src/train_action_labeler.py \
+    --epochs 1000 \
+    --checkpoint_dir /mnt/raid/diamond/better4/Breakout_action_labelers_100k_100 \
+    --data_dir /mnt/raid/diamond/better4/Breakout_recordings_100k/ \
+    --train_size 0.001 \
+    --write_new_dataset_dir /mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_100/ \
+    --eval_every_n_epochs 200 \
+    --lr 1e-4
+
+# 72.02%
+python src/train_action_labeler.py \
+    --epochs 1000 \
+    --checkpoint_dir /mnt/raid/diamond/better4/Breakout_action_labelers_100k_100 \
+    --data_dir /mnt/raid/diamond/better4/Breakout_recordings_100k/ \
+    --train_size 0.01 \
+    --write_new_dataset_dir /mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_1000/ \
+    --eval_every_n_epochs 200 \
+    --lr 1e-4
+
+# train the denoiser and rew_end_model for the 100 labeled dataset
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_100_denoiser \
+    wandb.name=Breakout_100k_labeled_100_denoiser \
+    collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_100/ \
+    common.device=cuda:0 \
+    denoiser.train=True \
+    rew_end_model.train=True \
+    actor_critic.train=False
+
+# train the denoiser and rew_end_model for the 1000 labeled dataset
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_1000_denoiser \
+    wandb.name=Breakout_100k_labeled_1000_denoiser \
+    collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_1000/ \
+    common.device=cuda:1 \
+    denoiser.train=True \
+    rew_end_model.train=True \
+    actor_critic.train=False
+
+# train the actor critic for the 100 labeled dataset
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_100_actor_critic \
+    wandb.name=Breakout_100k_labeled_100_actor_critic \
+    collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_100/ \
+    common.device=cuda:0 \
+    denoiser.train=False \
+    rew_end_model.train=False \
+    actor_critic.train=True \
+    initialization.path_to_ckpt=/mnt/raid/diamond/better4/Breakout_100k_labeled_100_denoiser/checkpoints/agent_versions/agent_epoch_01000.pt
+
+# train the actor critic for the 1000 labeled dataset
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_1000_actor_critic \
+    wandb.name=Breakout_100k_labeled_1000_actor_critic \
+    collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_1000/ \
+    common.device=cuda:1 \
+    denoiser.train=False \
+    rew_end_model.train=False \
+    actor_critic.train=True \
+    initialization.path_to_ckpt=/mnt/raid/diamond/better4/Breakout_100k_labeled_1000_denoiser/checkpoints/agent_versions/agent_epoch_01000.pt
+
+
+# train the actor critic for the 100 labeled dataset cont
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_100_actor_critic_cont \
+    wandb.name=Breakout_100k_labeled_100_actor_critic_cont \
+    collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_100/ \
+    common.device=cuda:0 \
+    denoiser.train=False \
+    rew_end_model.train=False \
+    actor_critic.train=True \
+    initialization.path_to_ckpt=/mnt/raid/diamond/better4/Breakout_100k_labeled_100_actor_critic/checkpoints/agent_versions/agent_epoch_00082.pt \
+    actor_critic.training.steps_first_epoch=400 \
+    evaluation.every=3
+
+# train the actor critic for the 1000 labeled dataset cont
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_1000_actor_critic_cont \
+    wandb.name=Breakout_100k_labeled_1000_actor_critic_cont \
+    collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_1000/ \
+    common.device=cuda:1 \
+    denoiser.train=False \
+    rew_end_model.train=False \
+    actor_critic.train=True \
+    initialization.path_to_ckpt=/mnt/raid/diamond/better4/Breakout_100k_labeled_1000_actor_critic/checkpoints/agent_versions/agent_epoch_00081.pt \
+    actor_critic.training.steps_first_epoch=400 \
+    evaluation.every=3
+```
+
+# run validation against their checkpoint
+```bash
+wget 'https://huggingface.co/eloialonso/diamond/resolve/main/atari_100k/Breakout.pt'
+
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    wandb.mode=disabled \
+    common.device=cuda:2 \
+    denoiser.train=False \
+    rew_end_model.train=False \
+    actor_critic.train=False \
+    initialization.path_to_ckpt=/workspace/Breakout.pt \
+    collection.test.num_episodes=100 \
+    only_run_validation=True
+
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    wandb.mode=disabled \
+    common.device=cuda:2 \
+    denoiser.train=False \
+    rew_end_model.train=True \
+    actor_critic.train=False \
+    initialization.path_to_ckpt=/workspace/Breakout.pt 
+    # collection.test.num_episodes=4 \
+    # only_run_validation=True
+
+# run search to see how good just world model is
+python src/searchy_boi.py
+```

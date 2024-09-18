@@ -21,6 +21,7 @@ def make_collector(
     epsilon: float = 0.0,
     reset_every_collect: bool = False,
     verbose: bool = True,
+    action_labeler = None,
 ) -> Generator[Logs, int, None]:
     num_envs = env.num_envs
 
@@ -42,7 +43,7 @@ def make_collector(
 
     def reset():
         nonlocal env_loop, episode_ids, dead
-        env_loop = make_env_loop(env, model, epsilon)
+        env_loop = make_env_loop(env, model, epsilon, action_labeler=action_labeler)
         episode_ids = defaultdict(lambda: None)
         dead = [None] * num_envs
 

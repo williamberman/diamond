@@ -17,3 +17,8 @@ __pycache__/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+action_labeler*.pt
+breakout_recordings/*
+*_recordings/*
+*.mp4
+*.png

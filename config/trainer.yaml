@@ -8,8 +8,8 @@ hydra:
     chdir: True
 
 wandb:
-  mode: disabled
-  project: null
+  mode: online
+  project: diamond
   entity: null
   name: null
   group: null
@@ -22,14 +22,16 @@ initialization:
   load_rew_end_model: True
   load_actor_critic: True
 
+only_run_validation: False
+
 common:
   device: cuda:0
   seed: null
   resume: False # do not modify, set by scripts/resume.sh only.
 
 checkpointing:
-  save_agent_every: 5
-  num_to_keep: 11  # number of checkpoints to keep, use null to disable
+  save_agent_every: 1
+  num_to_keep: null  # number of checkpoints to keep, use null to disable
 
 collection:
   path_to_static_dataset: null
@@ -42,15 +44,20 @@ collection:
       max: 10000  # null: no maximum
       threshold_rew: 10
     steps_per_epoch: 100
+    # action_labeler:
+    #   _target_: models.ImprovedCNN
+    #   num_classes: null
+    # action_labeler_checkpoint: "/workspace/action_labeler_2.pt"
+    action_labeler: null
   test:
     num_envs: 1
-    num_episodes: 4
+    num_episodes: 20
     epsilon: 0.0
     num_final_episodes: 100
 
 training:
   should: True
-  num_final_epochs: 50
+  num_final_epochs: 1000
   cache_in_ram: True
   num_workers_data_loaders: 0
   model_free: False # if True, turn off world_model training and RL in imagination
@@ -77,6 +84,8 @@ world_model_env:
     s_noise: 1.0
 
 denoiser:
+  train: True
+
   training:
     num_autoregressive_steps: 1
     start_after_epochs: 0
@@ -101,6 +110,8 @@ denoiser:
     sigma_max: 20
 
 rew_end_model:
+  train: True
+
   training:
     seq_length: ${eval:'${world_model_env.horizon} + ${agent.denoiser.inner_model.num_steps_conditioning}'}
     start_after_epochs: 0
@@ -118,6 +129,8 @@ rew_end_model:
     eps: 1e-8
 
 actor_critic:
+  train: True
+
   training:
     sample_weights: ${denoiser.training.sample_weights}
     batch_size: 32

@@ -1,0 +1,6 @@
+git clone https://github.com/williamberman/diamond.git
+cd diamond
+git checkout better
+pip install -r requirements.txt
+python src/play.py --path-ckpt my_checkpoints/agent_epoch_01000_100_labeled.pt --horizon 500 --game Breakout --only-reset-after-n-deaths 5
+python src/play.py --path-ckpt my_checkpoints/agent_epoch_01000_1000_labeled.pt --horizon 500 --game Breakout --only-reset-after-n-deaths 5

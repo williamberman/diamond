@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm, trange
 import wandb
+import traceback
 
 from agent import Agent
 from coroutines.collector import make_collector, NumToCollect
@@ -33,6 +34,7 @@ from utils import (
     try_until_no_except,
     wandb_log,
 )
+from compute_atari_100k import RANDOM_SCORES, HUMAN_SCORES
 
 
 class Trainer(StateDictMixin):
@@ -47,9 +49,7 @@ class Trainer(StateDictMixin):
         set_seed(cfg.common.seed)
 
         # Init wandb
-        try_until_no_except(
-            partial(wandb.init, config=OmegaConf.to_container(cfg, resolve=True), reinit=True, resume=True, **cfg.wandb)
-        )
+        wandb.init(config=OmegaConf.to_container(cfg, resolve=True), reinit=True, resume=True, **cfg.wandb)
 
         # Flags
         self._is_static_dataset = cfg.collection.path_to_static_dataset is not None
@@ -87,9 +87,13 @@ class Trainer(StateDictMixin):
         # Datasets
         num_workers = cfg.training.num_workers_data_loaders
         use_manager = cfg.training.cache_in_ram and (num_workers > 0)
-        p = Path(cfg.collection.path_to_static_dataset) if self._is_static_dataset else Path("dataset")
-        self.train_dataset = Dataset(p / "train", "train_dataset", cfg.training.cache_in_ram, use_manager)
-        self.test_dataset = Dataset(p / "test", "test_dataset", cache_in_ram=True)
+
+        if self._is_static_dataset:
+            self.train_dataset = Dataset(Path(cfg.collection.path_to_static_dataset), "train_dataset", cfg.training.cache_in_ram, use_manager)
+        else:
+            self.train_dataset = Dataset(Path("dataset/test"), "train_dataset", cfg.training.cache_in_ram, use_manager)
+
+        self.test_dataset = Dataset(Path("dataset/test"), "test_dataset", cache_in_ram=True)
         self.train_dataset.load_from_default_path()
         self.test_dataset.load_from_default_path()
 
@@ -100,13 +104,23 @@ class Trainer(StateDictMixin):
         # Create models
         num_actions = int(test_env.num_actions)
         self.agent = Agent(instantiate(cfg.agent, num_actions=num_actions)).to(self._device)
+        self.agent.denoiser.compute_loss = torch.compile(self.agent.denoiser.compute_loss, mode="reduce-overhead")
 
         if cfg.initialization.path_to_ckpt is not None:
             self.agent.load(**cfg.initialization)
 
+        if cfg.collection.train.action_labeler is not None:
+            cfg.collection.train.action_labeler.num_classes = num_actions
+            action_labeler = instantiate(cfg.collection.train.action_labeler).eval().requires_grad_(False).to(self._device)
+            action_labeler.load_state_dict(torch.load(cfg.collection.train.action_labeler_checkpoint))
+            print(f"Action labeler loaded from {cfg.collection.train.action_labeler_checkpoint}")
+        else:
+            print("No action labeler, using real action labels")
+            action_labeler = None
+
         # Collectors
         self._train_collector = make_collector(
-            train_env, self.agent.actor_critic, self.train_dataset, cfg.collection.train.epsilon
+            train_env, self.agent.actor_critic, self.train_dataset, cfg.collection.train.epsilon, action_labeler=action_labeler
         )
         self._test_collector = make_collector(
             test_env, self.agent.actor_critic, self.test_dataset, cfg.collection.test.epsilon, reset_every_collect=True
@@ -194,6 +208,13 @@ class Trainer(StateDictMixin):
     def run(self) -> None:
         to_log = []
 
+        if hasattr(self._cfg, "only_run_validation") and self._cfg.only_run_validation:
+            to_log += self.collect_test()
+            if not self._is_model_free:
+                to_log += self.test_agent()
+            wandb_log(to_log, 0)
+            return
+
         if self.epoch == 0:
             if self._is_model_free or self._is_static_dataset:
                 self.num_epochs_collect = 0
@@ -223,9 +244,8 @@ class Trainer(StateDictMixin):
 
             # Evaluation
             should_test = self._cfg.evaluation.should and (self.epoch % self._cfg.evaluation.every == 0)
-            should_collect_test = should_test and not self._is_static_dataset
 
-            if should_collect_test:
+            if should_test:
                 to_log += self.collect_test()
 
             if should_test and not self._is_model_free:
@@ -292,6 +312,15 @@ class Trainer(StateDictMixin):
         for i, (ep_id, ret, length) in enumerate(zip(episode_ids, returns, lengths)):
             print(f"  Episode {ep_id}: return = {ret} length = {length}\n", end="\n" if i == episodes - 1 else "")
 
+        game = self._cfg.env.test.id.replace("NoFrameskip-v4", "")
+        mean_return = np.array(returns).mean()
+        min_return = np.array(returns).min()
+        max_return = np.array(returns).max()
+        atari_100k_score_hns = (mean_return - RANDOM_SCORES[game]) / (HUMAN_SCORES[game] - RANDOM_SCORES[game])
+        atari_100k_score_hns = atari_100k_score_hns.item()
+        print(f"Atari 100k hns score: {atari_100k_score_hns:.2f} mean_return: {mean_return:.2f} min_return: {min_return:.2f} max_return: {max_return:.2f}")
+        to_log.append({"atari_100k_score_hns": atari_100k_score_hns, "atari_100k_mean_return": mean_return, "atari_100k_min_return": min_return, "atari_100k_max_return": max_return})
+
         self.num_episodes_test += episodes
 
         if final:
@@ -304,22 +333,43 @@ class Trainer(StateDictMixin):
         self.agent.train()
         self.agent.zero_grad()
         to_log = []
-        model_names = ["actor_critic"] if self._is_model_free else self._model_names
+
+        model_names = []
+
+        if self._cfg.denoiser.train:
+            model_names.append("denoiser")
+
+        if self._cfg.rew_end_model.train:
+            model_names.append("rew_end_model")
+
+        if self._cfg.actor_critic.train:
+            model_names.append("actor_critic")
+
         for name in model_names:
             cfg = getattr(self._cfg, name).training
             if self.epoch > cfg.start_after_epochs:
                 steps = cfg.steps_first_epoch if self.epoch == 1 else cfg.steps_per_epoch
                 to_log += self.train_component(name, steps)
+            self.save_checkpoint()
         return to_log
 
     @torch.no_grad()
     def test_agent(self) -> Logs:
         self.agent.eval()
         to_log = []
-        model_names = [] if self._is_model_free else self._model_names[:-1]
+        model_names = []
+
+        if self._cfg.denoiser.train:
+            model_names.append("denoiser")
+
+        if self._cfg.rew_end_model.train:
+            model_names.append("rew_end_model")
+
+        # we do not eval the actor critic here
+
         for name in model_names:
             cfg = getattr(self._cfg, name).training
-            if self.epoch > cfg.start_after_epochs:
+            if self.epoch > cfg.start_after_epochs or self._cfg.only_run_validation:
                 to_log += self.test_component(name)
         return to_log
 
@@ -342,6 +392,9 @@ class Trainer(StateDictMixin):
             loss, metrics = model.compute_loss(batch) if batch is not None else model.compute_loss()
             loss.backward()
 
+            if loss.isnan() or loss.isinf():
+                assert False, "fuk dude"
+
             num_batch = self.num_batch_train.get(name)
             metrics[f"num_batch_train_{name}"] = num_batch
             self.num_batch_train.set(name, num_batch + 1)
@@ -350,6 +403,7 @@ class Trainer(StateDictMixin):
                 if cfg.max_grad_norm is not None:
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
                     metrics["grad_norm_before_clip"] = grad_norm
+                    print(f"grad_norm: {grad_norm} loss: {loss.item()}")
 
                 opt.step()
                 opt.zero_grad()
@@ -372,7 +426,10 @@ class Trainer(StateDictMixin):
         to_log = []
         for batch in tqdm(data_loader, desc=f"Evaluating {name}"):
             batch = batch.to(self._device)
-            _, metrics = model.compute_loss(batch)
+            try:
+                _, metrics = model.compute_loss(batch)
+            except:
+                traceback.print_exc()
             num_batch = self.num_batch_test.get(name)
             metrics[f"num_batch_test_{name}"] = num_batch
             self.num_batch_test.set(name, num_batch + 1)

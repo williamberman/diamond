@@ -23,6 +23,7 @@ class InnerModelConfig:
 class InnerModel(nn.Module):
     def __init__(self, cfg: InnerModelConfig) -> None:
         super().__init__()
+        self.cfg = cfg
         self.noise_emb = FourierFeatures(cfg.cond_channels)
         self.act_emb = nn.Sequential(
             nn.Embedding(cfg.num_actions, cfg.cond_channels // cfg.num_steps_conditioning),
@@ -42,6 +43,10 @@ class InnerModel(nn.Module):
         nn.init.zeros_(self.conv_out.weight)
 
     def forward(self, noisy_next_obs: Tensor, c_noise: Tensor, obs: Tensor, act: Tensor) -> Tensor:
+        dtype = self.conv_in.weight.dtype
+        noisy_next_obs = noisy_next_obs.to(dtype)
+        c_noise = c_noise.to(dtype)
+        obs = obs.to(dtype)
         cond = self.cond_proj(self.noise_emb(c_noise) + self.act_emb(act))
         x = self.conv_in(torch.cat((obs, noisy_next_obs), dim=1))
         x, _, _ = self.unet(x, cond)
