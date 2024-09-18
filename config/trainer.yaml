@@ -8,7 +8,7 @@ hydra:
     chdir: True
 
 wandb:
-  mode: enabled
+  mode: online
   project: diamond
   entity: null
   name: null

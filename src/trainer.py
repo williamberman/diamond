@@ -47,9 +47,7 @@ class Trainer(StateDictMixin):
         set_seed(cfg.common.seed)
 
         # Init wandb
-        try_until_no_except(
-            partial(wandb.init, config=OmegaConf.to_container(cfg, resolve=True), reinit=True, resume=True, **cfg.wandb)
-        )
+        wandb.init(config=OmegaConf.to_container(cfg, resolve=True), reinit=True, resume=True, **cfg.wandb)
 
         # Flags
         self._is_static_dataset = cfg.collection.path_to_static_dataset is not None
@@ -110,6 +108,7 @@ class Trainer(StateDictMixin):
             action_labeler.load_state_dict(torch.load(cfg.collection.train.action_labeler_checkpoint))
             print(f"Action labeler loaded from {cfg.collection.train.action_labeler_checkpoint}")
         else:
+            print("No action labeler, using real action labels")
             action_labeler = None
 
         # Collectors
