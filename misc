@@ -8,3 +8,12 @@ python src/main.py env.train.id=BreakoutNoFrameskip-v4 common.device=cuda:0
 python src/play.py --pretrained --record --recording-dir ./pong_recordings --default-env test --game 20 --headless-collect-n 400 --device cuda:1
 python src/train_action_labeler.py --data_dir ./pong_recordings/ --device cuda:1
 python src/main.py env.train.id=PongNoFrameskip-v4 common.device=cuda:1
+
+./run.sh Breakout 0
+docker exec -it brave_beaver bash -c "./run.sh Pong 1"
+docker exec -it brave_beaver bash -c "./run.sh Alien 2"
+docker exec -it brave_beaver bash -c "./run.sh Amidar 3"
+docker exec -it brave_beaver bash -c "./run.sh Assault 4"
+docker exec -it brave_beaver bash -c "./run.sh Asterix 5"
+docker exec -it brave_beaver bash -c "./run.sh BankHeist 6"
+docker exec -it brave_beaver bash -c "./run.sh BattleZone 7"
