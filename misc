@@ -17,3 +17,5 @@ docker exec -it brave_beaver bash -c "./run.sh Assault 4"
 docker exec -it brave_beaver bash -c "./run.sh Asterix 5"
 docker exec -it brave_beaver bash -c "./run.sh BankHeist 6"
 docker exec -it brave_beaver bash -c "./run.sh BattleZone 7"
+
+python src/play.py --path-ckpt /Users/williamberman/Downloads/agent_epoch_00001.pt --horizon 100 --game Pong

@@ -54,6 +54,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--game", type=str, default=None, help="Game to play.")
     parser.add_argument("--headless-collect-n", type=int, default=None, help="Number of steps to collect in headless mode.")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="Device to use.")
+    parser.add_argument("--path-ckpt", type=str, default=None, help="Path to the checkpoint.")
+    parser.add_argument("--horizon", type=int, default=50, help="Horizon for the world model environment.")
     return parser.parse_args()
 
 
@@ -85,6 +87,14 @@ def prepare_dataset_mode(cfg: DictConfig) -> Tuple[DatasetEnv, Keymap, ActionNam
     keymap, _ = get_keymap_and_action_names("dataset_mode")
     return dataset_env, keymap
 
+def get_game_name(game):
+    try:
+        name = ATARI_100K_GAMES[int(game)]
+    except ValueError:
+        assert game in ATARI_100K_GAMES, f"Game {game} not found in Atari 100K games."
+        name = game
+    return name
+
 
 def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace, thread_id=None) -> Tuple[PlayEnv, Keymap, ActionNames]:
     # Checkpoint
@@ -92,18 +102,21 @@ def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace, thread_id=None)
         if args.game is None:
             name = prompt_atari_game()
         else:
-            try:
-                name = ATARI_100K_GAMES[int(args.game)]
-            except ValueError:
-                assert args.game in ATARI_100K_GAMES, f"Game {args.game} not found in Atari 100K games."
-                name = args.game
-        path_ckpt = download(f"atari_100k/{name}.pt")
+            name = get_game_name(args.game)
 
+        path_ckpt = download(f"atari_100k/{name}.pt")
         # Override config
         cfg.agent = OmegaConf.load(download("config/agent/default.yaml"))
         cfg.env = OmegaConf.load(download("config/env/atari.yaml"))
         cfg.env.train.id = cfg.env.test.id = f"{name}NoFrameskip-v4"
-        cfg.world_model_env.horizon = 50
+        cfg.world_model_env.horizon = args.horizon
+    elif args.path_ckpt is not None:
+        path_ckpt = Path(args.path_ckpt)
+
+        assert args.game is not None, "Must provide game name when using --path-ckpt"
+        name = get_game_name(args.game)
+        cfg.env.train.id = cfg.env.test.id = f"{name}NoFrameskip-v4"
+        cfg.world_model_env.horizon = args.horizon
     else:
         path_ckpt = get_path_agent_ckpt("checkpoints", epoch=-1)
 
