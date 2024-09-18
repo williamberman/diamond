@@ -51,8 +51,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-header", action="store_true")
     parser.add_argument("--recording-dir", type=str, default=None, help="Directory to store recordings.")
     parser.add_argument("--default-env", choices=["wm", "test", "train"], default="wm", help="Default environment.")
-    parser.add_argument("--game", type=int, default=None, help="Game to play.")
+    parser.add_argument("--game", type=str, default=None, help="Game to play.")
     parser.add_argument("--headless-collect-n", type=int, default=None, help="Number of steps to collect in headless mode.")
+    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="Device to use.")
     return parser.parse_args()
 
 
@@ -91,7 +92,11 @@ def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace, thread_id=None)
         if args.game is None:
             name = prompt_atari_game()
         else:
-            name = ATARI_100K_GAMES[args.game]
+            try:
+                name = ATARI_100K_GAMES[int(args.game)]
+            except ValueError:
+                assert args.game in ATARI_100K_GAMES, f"Game {args.game} not found in Atari 100K games."
+                name = args.game
         path_ckpt = download(f"atari_100k/{name}.pt")
 
         # Override config
@@ -102,7 +107,7 @@ def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace, thread_id=None)
     else:
         path_ckpt = get_path_agent_ckpt("checkpoints", epoch=-1)
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device)
 
     # Real envs
     train_env = make_atari_env(num_envs=1, device=device, **cfg.env.train)
@@ -175,7 +180,7 @@ def main():
         cfg = compose(config_name="trainer")
 
     if args.headless_collect_n is not None:
-        print(f"Collecting {args.headless_collect_n} steps in headless mode.")
+        print(f"Collecting {args.headless_collect_n} episodes in headless mode.")
         assert not args.dataset_mode
 
         n_threads = 20

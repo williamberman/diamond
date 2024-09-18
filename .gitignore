@@ -19,3 +19,4 @@ __pycache__/
 
 action_labeler*.pt
 breakout_recordings/*
+*_recordings/*

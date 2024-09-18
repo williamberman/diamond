@@ -153,9 +153,9 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
         avg_train_loss = total_train_loss / steps_per_epoch
         print(f'Epoch {epoch+1}/{num_epochs} completed, Average Train Loss: {avg_train_loss:.4f}')
     
-        torch.save(model.state_dict(), f"action_labeler_{epoch+1}.pt")
+        torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"action_labeler_{epoch+1}.pt"))
 
-    torch.save(model.state_dict(), f"action_labeler_final.pt")
+    torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"action_labeler_final.pt"))
 
 def main(args):
     if args.gpu is not None:
@@ -184,7 +184,7 @@ def main(args):
     train_loader = DataLoader(train_dataset, num_workers=args.batch_size, batch_size=args.batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, num_workers=0, batch_size=args.batch_size, shuffle=False)
 
-    num_classes = df['action'].nunique()
+    num_classes = df['action'].max() + 1
     model = ImprovedCNN(num_classes).to(device)
 
     criterion = nn.CrossEntropyLoss()
@@ -200,6 +200,9 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=20, help="Number of epochs to train")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--gpu", type=int, default=7, help="GPU ID to use (default: None, use CPU)")
+    parser.add_argument("--checkpoint_dir", type=str, default="action_labelers", help="Directory to save checkpoints")
     args = parser.parse_args()
+
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     main(args)
