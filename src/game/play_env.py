@@ -27,6 +27,7 @@ class PlayEnv:
         recording_mode: bool,
         store_denoising_trajectory: bool,
         store_original_obs: bool,
+        recording_dir: str=None
     ) -> None:
         self.agent = agent
         self.envs = envs
@@ -39,6 +40,7 @@ class PlayEnv:
         self.env_id = 0
         self.env_name, self.env = self.envs[0]
         self.obs, self.t, self.return_, self.hx_cx, self.ckpt_id, self.buffer, self.rec_dataset = (None,) * 7
+        self.recording_dir = recording_dir
 
     def print_controls(self) -> None:
         print("\nControls (play mode):\n")
@@ -97,7 +99,10 @@ class PlayEnv:
     def reset_recording(self) -> None:
         self.buffer = defaultdict(list)
         self.buffer["info"] = defaultdict(list)
-        dir = Path("dataset") / f"rec_{self.env_name}_{'H' if self.is_human_player else 'π'}"
+        if self.recording_dir is not None:
+            dir = Path(self.recording_dir)
+        else:
+            dir = Path("dataset") / f"rec_{self.env_name}_{'H' if self.is_human_player else 'π'}"
         self.rec_dataset = Dataset(dir)
         self.rec_dataset.load_from_default_path()
 

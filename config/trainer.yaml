@@ -28,8 +28,8 @@ common:
   resume: False # do not modify, set by scripts/resume.sh only.
 
 checkpointing:
-  save_agent_every: 5
-  num_to_keep: 11  # number of checkpoints to keep, use null to disable
+  save_agent_every: 1
+  num_to_keep: null  # number of checkpoints to keep, use null to disable
 
 collection:
   path_to_static_dataset: null
@@ -42,6 +42,10 @@ collection:
       max: 10000  # null: no maximum
       threshold_rew: 10
     steps_per_epoch: 100
+    action_labeler:
+      _target_: models.ImprovedCNN
+      num_classes: null
+    action_labeler_checkpoint: "/workspace/action_labeler_2.pt"
   test:
     num_envs: 1
     num_episodes: 4
@@ -54,7 +58,7 @@ training:
   cache_in_ram: True
   num_workers_data_loaders: 0
   model_free: False # if True, turn off world_model training and RL in imagination
-  compile_wm: True
+  compile_wm: False
 
 evaluation:
   should: True
