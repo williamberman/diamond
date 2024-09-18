@@ -11,3 +11,4 @@ wandb==0.17.0
 ipdb
 pandas
 scikit-learn
+git+https://github.com/google-research/rliable
