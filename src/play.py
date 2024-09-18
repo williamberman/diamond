@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 from typing import Tuple
+import concurrent.futures
 
 from huggingface_hub import hf_hub_download
 from hydra import compose, initialize
@@ -14,8 +15,20 @@ from coroutines.collector import make_collector, NumToCollect
 from data import BatchSampler, collate_segments_to_batch, Dataset
 from envs import make_atari_env, WorldModelEnv
 from game import ActionNames, DatasetEnv, Game, get_keymap_and_action_names, Keymap, NamedEnv, PlayEnv
-from utils import get_path_agent_ckpt, prompt_atari_game
+from utils import ATARI_100K_GAMES, get_path_agent_ckpt, prompt_atari_game
+import tqdm
+import math
+import os
 
+# python src/play.py --pretrained --record --recording-dir ./test_recording --default-env test --game 7 --headless-collect-n 100
+# cd src
+"""
+from data import Dataset, SegmentId
+
+dataset = Dataset("../test_recording/0/", name="name", save_on_disk=True, use_manager=False)
+dataset.load_from_default_path()
+dataset[SegmentId(episode_id=0, start=0, stop=10)]
+"""
 
 OmegaConf.register_new_resolver("eval", eval)
 
@@ -36,6 +49,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=15, help="Frame rate.")
     parser.add_argument("--size", type=int, default=640, help="Window size.")
     parser.add_argument("--no-header", action="store_true")
+    parser.add_argument("--recording-dir", type=str, default=None, help="Directory to store recordings.")
+    parser.add_argument("--default-env", choices=["wm", "test", "train"], default="wm", help="Default environment.")
+    parser.add_argument("--game", type=int, default=None, help="Game to play.")
+    parser.add_argument("--headless-collect-n", type=int, default=None, help="Number of steps to collect in headless mode.")
     return parser.parse_args()
 
 
@@ -68,10 +85,13 @@ def prepare_dataset_mode(cfg: DictConfig) -> Tuple[DatasetEnv, Keymap, ActionNam
     return dataset_env, keymap
 
 
-def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace) -> Tuple[PlayEnv, Keymap, ActionNames]:
+def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace, thread_id=None) -> Tuple[PlayEnv, Keymap, ActionNames]:
     # Checkpoint
     if args.pretrained:
-        name = prompt_atari_game()
+        if args.game is None:
+            name = prompt_atari_game()
+        else:
+            name = ATARI_100K_GAMES[args.game]
         path_ckpt = download(f"atari_100k/{name}.pt")
 
         # Override config
@@ -94,7 +114,11 @@ def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace) -> Tuple[PlayEn
 
     # Collect for imagination's initialization
     n = args.num_steps_initial_collect
-    dataset = Dataset(Path(f"dataset/{path_ckpt.stem}_{n}"))
+    if thread_id is not None:
+        dataset_dir = Path(f"dataset/{path_ckpt.stem}_{n}_{thread_id}")
+    else:
+        dataset_dir = Path(f"dataset/{path_ckpt.stem}_{n}")
+    dataset = Dataset(dataset_dir)
     dataset.load_from_default_path()
     if len(dataset) == 0:
         print(f"Collecting {n} steps in real environment for world model initialization.")
@@ -108,13 +132,24 @@ def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace) -> Tuple[PlayEn
     wm_env_cfg = instantiate(cfg.world_model_env, num_batches_to_preload=1)
     wm_env = WorldModelEnv(agent.denoiser, agent.rew_end_model, dl, wm_env_cfg, return_denoising_trajectory=True)
 
-    envs = [
-        NamedEnv("wm", wm_env),
-        NamedEnv("test", test_env),
-        NamedEnv("train", train_env),
-    ]
+    envs_ = {
+        "wm": NamedEnv("wm", wm_env),
+        "test": NamedEnv("test", test_env),
+        "train": NamedEnv("train", train_env),
+    }
+    envs = [envs_.pop(args.default_env)]
+    envs.extend(envs_.values())
 
     env_keymap, env_action_names = get_keymap_and_action_names(cfg.env.keymap)
+
+    if args.recording_dir is not None:
+        if thread_id is not None:
+            recording_dir = os.path.join(args.recording_dir, str(thread_id))
+        else:
+            recording_dir = args.recording_dir
+    else:
+        recording_dir = None
+
     play_env = PlayEnv(
         agent,
         envs,
@@ -123,6 +158,7 @@ def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace) -> Tuple[PlayEn
         args.record,
         args.store_denoising_trajectory,
         args.store_original_obs,
+        recording_dir,
     )
 
     return play_env, env_keymap
@@ -138,10 +174,39 @@ def main():
     with initialize(version_base="1.3", config_path="../config"):
         cfg = compose(config_name="trainer")
 
-    env, keymap = prepare_dataset_mode(cfg) if args.dataset_mode else prepare_play_mode(cfg, args)
-    size = (args.size // cfg.env.train.size) * cfg.env.train.size  # window size
-    game = Game(env, keymap, (size, size), fps=args.fps, verbose=not args.no_header)
-    game.run()
+    if args.headless_collect_n is not None:
+        print(f"Collecting {args.headless_collect_n} steps in headless mode.")
+        assert not args.dataset_mode
+
+        n_threads = 10
+        n_per_thread = math.ceil(args.headless_collect_n / n_threads)
+
+        pbar = tqdm.tqdm(total=n_threads * n_per_thread)
+
+        def do(thread_id):
+            env, _ = prepare_play_mode(cfg, args, thread_id)
+
+            assert not env.is_human_player
+
+            for episode in range(n_per_thread):
+                env.reset()
+
+                while True:
+                    _, _, end, trunc, _ = env.step(0)
+                    if end or trunc:
+                        break
+
+                pbar.update(1)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
+            futures = [executor.submit(do, i) for i in range(n_threads)]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+    else:
+        env, keymap = prepare_dataset_mode(cfg) if args.dataset_mode else prepare_play_mode(cfg, args)
+        size = (args.size // cfg.env.train.size) * cfg.env.train.size  # window size
+        game = Game(env, keymap, (size, size), fps=args.fps, verbose=not args.no_header)
+        game.run()
 
 
 if __name__ == "__main__":
