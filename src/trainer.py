@@ -33,6 +33,7 @@ from utils import (
     try_until_no_except,
     wandb_log,
 )
+from compute_atari_100k import RANDOM_SCORES, HUMAN_SCORES
 
 
 class Trainer(StateDictMixin):
@@ -298,6 +299,12 @@ class Trainer(StateDictMixin):
         episode_ids, returns, lengths = [[d[k] for d in to_log_episodes] for k in keys]
         for i, (ep_id, ret, length) in enumerate(zip(episode_ids, returns, lengths)):
             print(f"  Episode {ep_id}: return = {ret} length = {length}\n", end="\n" if i == episodes - 1 else "")
+
+        game = self._cfg.env.test.id.replace("NoFrameskip-v4", "")
+        atari_100k_score_hns = (np.array(returns).mean() - RANDOM_SCORES[game]) / (HUMAN_SCORES[game] - RANDOM_SCORES[game])
+        atari_100k_score_hns = atari_100k_score_hns.item()
+        print(f"Atari 100k hns score: {atari_100k_score_hns} min_score: {RANDOM_SCORES[game]} max_score: {HUMAN_SCORES[game]}")
+        to_log.append({"atari_100k_score_hns": atari_100k_score_hns})
 
         self.num_episodes_test += episodes
 

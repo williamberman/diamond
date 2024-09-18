@@ -48,7 +48,7 @@ collection:
     action_labeler_checkpoint: "/workspace/action_labeler_2.pt"
   test:
     num_envs: 1
-    num_episodes: 4
+    num_episodes: 20
     epsilon: 0.0
     num_final_episodes: 100
 

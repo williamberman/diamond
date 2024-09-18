@@ -74,8 +74,9 @@ HUMAN_SCORES = {
 MEAN = lambda x: metrics.aggregate_mean(x)
 MEDIAN = lambda x: metrics.aggregate_median(x)
 
-def score_normalization(res_dict, min_scores, max_scores):
-  games = res_dict.keys()
+def score_normalization(res_dict):
+  min_scores = RANDOM_SCORES
+  max_scores = HUMAN_SCORES
   norm_scores = {}
   for game, scores in res_dict.items():
     norm_scores[game] = (scores - min_scores[game])/(max_scores[game] - min_scores[game])
@@ -92,7 +93,7 @@ def create_score_dict_atari_100k(main_df, normalization=True,
   for key, df in main_df.items():
     score_dict[key] = df[evaluation_key].values
   if normalization:
-    score_dict = score_normalization(score_dict, RANDOM_SCORES, HUMAN_SCORES)
+    score_dict = score_normalization(score_dict)
   return score_dict
 
 def get_scores(df, normalization=True, eval='Final'):
@@ -162,7 +163,7 @@ def load_json_scores(algorithm_name, base_path='atari_100k'):
   with open(path, 'r') as f:
     scores = json.load(f)
   scores = {game: np.array(val) for game, val in scores.items()}
-  scores = score_normalization(scores, RANDOM_SCORES, HUMAN_SCORES)
+  scores = score_normalization(scores)
   score_matrix = convert_to_matrix(scores)
   median, mean = MEDIAN(score_matrix), MEAN(score_matrix)
   print('{}: Median: {}, Mean: {}'.format(eval, median, mean))
@@ -211,7 +212,7 @@ def compute_atari_100k(dir_for_my_scores=None):
           my_scores.update(json.load(f))
 
     my_scores = {game: np.array(scores) for game, scores in my_scores.items()}
-    my_scores = score_normalization(my_scores, RANDOM_SCORES, HUMAN_SCORES)
+    my_scores = score_normalization(my_scores)
     my_scores = {game: np.mean(scores) for game, scores in my_scores.items()}
 
     scores['My Scores'] = my_scores
