@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 from typing import Tuple
 import concurrent.futures
+import json
 
 from huggingface_hub import hf_hub_download
 from hydra import compose, initialize
@@ -52,10 +53,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recording-dir", type=str, default=None, help="Directory to store recordings.")
     parser.add_argument("--default-env", choices=["wm", "test", "train"], default="wm", help="Default environment.")
     parser.add_argument("--game", type=str, default=None, help="Game to play.")
-    parser.add_argument("--headless-collect-n", type=int, default=None, help="Number of steps to collect in headless mode.")
+    parser.add_argument("--headless-collect-n", type=int, default=None, help="Number of episodes to collect in headless mode.")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="Device to use.")
     parser.add_argument("--path-ckpt", type=str, default=None, help="Path to the checkpoint.")
     parser.add_argument("--horizon", type=int, default=50, help="Horizon for the world model environment.")
+    parser.add_argument("--write-rewards", type=str, default=None, help="Path to write rewards.")
     return parser.parse_args()
 
 
@@ -206,20 +208,36 @@ def main():
 
             assert not env.is_human_player
 
+            rewards = []
+
             for episode in range(n_per_thread):
                 env.reset()
+                rewards.append(0)
 
                 while True:
-                    _, _, end, trunc, _ = env.step(0)
+                    _, rew, end, trunc, _ = env.step(0)
+                    rewards[-1] += rew.item()
                     if end or trunc:
                         break
 
+                print(f"Episode {episode} reward: {rewards[-1]} average reward: {sum(rewards) / len(rewards):.2f}")
+
                 pbar.update(1)
+
+            return rewards
+
+        all_rewards = []
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
             futures = [executor.submit(do, i) for i in range(n_threads)]
             for future in concurrent.futures.as_completed(futures):
-                future.result()
+                all_rewards.extend(future.result())
+
+        print(f"Collected {len(all_rewards)} episodes with average reward: {sum(all_rewards) / len(all_rewards):.2f}")
+
+        if args.write_rewards is not None:
+            with open(args.write_rewards, "w") as f:
+                json.dump({args.game: all_rewards}, f, indent=4)
     else:
         env, keymap = prepare_dataset_mode(cfg) if args.dataset_mode else prepare_play_mode(cfg, args)
         size = (args.size // cfg.env.train.size) * cfg.env.train.size  # window size
