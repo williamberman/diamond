@@ -104,9 +104,15 @@ class Trainer(StateDictMixin):
         if cfg.initialization.path_to_ckpt is not None:
             self.agent.load(**cfg.initialization)
 
+        if cfg.collection.train.action_labeler is not None:
+            cfg.collection.train.action_labeler.num_classes = num_actions
+            action_labeler = instantiate(cfg.collection.train.action_labeler).eval().requires_grad_(False).to(self._device)
+        else:
+            action_labeler = None
+
         # Collectors
         self._train_collector = make_collector(
-            train_env, self.agent.actor_critic, self.train_dataset, cfg.collection.train.epsilon
+            train_env, self.agent.actor_critic, self.train_dataset, cfg.collection.train.epsilon, action_labeler=action_labeler
         )
         self._test_collector = make_collector(
             test_env, self.agent.actor_critic, self.test_dataset, cfg.collection.test.epsilon, reset_every_collect=True

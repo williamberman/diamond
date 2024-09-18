@@ -11,7 +11,7 @@ from envs import TorchEnv, WorldModelEnv
 
 @coroutine
 def make_env_loop(
-    env: Union[TorchEnv, WorldModelEnv], model: nn.Module, epsilon: float = 0.0
+    env: Union[TorchEnv, WorldModelEnv], model: nn.Module, epsilon: float = 0.0, action_labeler=None
 ) -> Generator[Tuple[torch.Tensor, ...], int, None]:
     num_steps = yield
 
@@ -54,6 +54,9 @@ def make_env_loop(
                     burnin_obs = info["burnin_obs"]
                     for i in range(burnin_obs.size(1)):
                         _, _, (hx[dead], cx[dead]) = model(burnin_obs[:, i], (hx[dead], cx[dead]))
+
+            if action_labeler is not None:
+                act = action_labeler(next_obs - obs).argmax(dim=-1)
 
             all_.append([obs, act, rew, end, trunc, logits_act, val, None])
             infos.append(info)
