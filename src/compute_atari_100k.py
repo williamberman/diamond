@@ -168,7 +168,7 @@ def load_json_scores(algorithm_name, base_path='atari_100k'):
   print('{}: Median: {}, Mean: {}'.format(eval, median, mean))
   return scores, score_matrix
 
-def compute_atari_100k():
+def compute_atari_100k(dir_for_my_scores=None):
   (score_dict_der, score_der), (_, score_der_max) = load_and_read_scores(
       'DER', num_evals=10)
   (score_dict_curl, score_curl), (_, score_curl_max) = read_curl_scores()
@@ -201,11 +201,31 @@ def compute_atari_100k():
       for game in scores[method].keys():
           mean_score = np.mean(scores[method][game])
           scores[method][game] = mean_score
+
+  if dir_for_my_scores is not None:
+    my_scores = {}
+
+    for x in os.listdir(dir_for_my_scores):
+      if x.endswith('.json'):
+        with open(os.path.join(dir_for_my_scores, x), 'r') as f:
+          my_scores.update(json.load(f))
+
+    my_scores = {game: np.array(scores) for game, scores in my_scores.items()}
+    my_scores = score_normalization(my_scores, RANDOM_SCORES, HUMAN_SCORES)
+    my_scores = {game: np.mean(scores) for game, scores in my_scores.items()}
+
+    scores['My Scores'] = my_scores
   
   scores = pd.DataFrame(scores)
 
   return scores
 
 if __name__ == '__main__':
-  scores = compute_atari_100k().round(2)
+  from argparse import ArgumentParser
+
+  parser = ArgumentParser()
+  parser.add_argument('--dir-for-my-scores', type=str, default=None)
+  args = parser.parse_args()
+
+  scores = compute_atari_100k(args.dir_for_my_scores).round(2)
   print(scores)

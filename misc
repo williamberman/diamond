@@ -29,7 +29,7 @@ python src/play.py \
  --game Pong \
  --headless-collect-n 100 \
  --default-env test \
- --write-rewards ./pong_rewards.json
+ --write-rewards ./reward_data/pong_rewards.json
 ```
 ```bash
 python src/play.py \
@@ -37,5 +37,9 @@ python src/play.py \
  --game Breakout \
  --headless-collect-n 100 \
  --default-env test \
- --write-rewards ./breakout_rewards.json
+ --write-rewards ./reward_data/breakout_rewards.json
+```
+
+```bash
+python src/compute_atari_100k.py --dir-for-my-scores ./reward_data
 ```

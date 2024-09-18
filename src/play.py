@@ -236,6 +236,7 @@ def main():
         print(f"Collected {len(all_rewards)} episodes with average reward: {sum(all_rewards) / len(all_rewards):.2f}")
 
         if args.write_rewards is not None:
+            os.makedirs(os.path.dirname(args.write_rewards), exist_ok=True)
             with open(args.write_rewards, "w") as f:
                 json.dump({args.game: all_rewards}, f, indent=4)
     else:
