@@ -62,7 +62,7 @@ class ActorCritic(nn.Module):
 
     def setup_training(self, rl_env: Union[TorchEnv, WorldModelEnv], loss_cfg: ActorCriticLossConfig) -> None:
         assert self.env_loop is None and self.loss_cfg is None
-        self.env_loop = make_env_loop(rl_env, self)
+        self.env_loop = make_env_loop(rl_env, self) # We do not pass action_labeler here
         self.loss_cfg = loss_cfg
 
     def forward(self, obs: Tensor, hx_cx: Tuple[Tensor, Tensor]) -> ActorCriticOutput:
