@@ -13,10 +13,11 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from sklearn.model_selection import train_test_split
 from models import ImprovedCNN
-from data import Dataset
+from data import Dataset, Episode
 import glob
 import concurrent.futures
 import tqdm
+from collections import defaultdict
 
 def load_data_from_parquet(directory):
     all_data = []
@@ -26,21 +27,34 @@ def load_data_from_parquet(directory):
     return pd.concat(all_data, ignore_index=True)
 
 def load_data_from_dataset(directory):
-    def dataset_to_df(dataset):
+    def dataset_to_df(dir):
+        dataset = Dataset(dir)
+        dataset.load_from_default_path()
+
         all_data = []
 
         for episode_id in range(dataset.num_episodes):
             episode = dataset.load_episode(episode_id)
 
-            for i in range(len(episode)-1):
+            for i in range(len(episode)):
+                if i == len(episode)-1:
+                    next_state = None
+                else:
+                    next_state = episode.obs[i+1]
+
                 state = episode.obs[i]
-                next_state = episode.obs[i+1]
                 action = episode.act[i].item()
 
                 all_data.append({
                     'state_img': state,
                     'next_state_img': next_state,
-                    'action': action
+                    'action': action,
+                    'episode_id': episode_id,
+                    'reward': episode.rew[i],
+                    'end': episode.end[i],
+                    'trunc': episode.trunc[i],
+                    'dir': dir,
+                    'step_id': i,
                 })
 
         df = pd.DataFrame(all_data)
@@ -48,9 +62,7 @@ def load_data_from_dataset(directory):
         return df
 
     if len([x for x in os.listdir(directory) if x.endswith('.pt')]) > 0:
-        dataset = Dataset(directory)
-        dataset.load_from_default_path()
-        df = dataset_to_df(dataset)
+        df = dataset_to_df(directory)
     else:
         datasets = []
 
@@ -59,9 +71,7 @@ def load_data_from_dataset(directory):
         pbar = tqdm.tqdm(total=len(dirs))
 
         def do(dir):
-            dataset = Dataset(dir)
-            dataset.load_from_default_path()
-            df = dataset_to_df(dataset)
+            df = dataset_to_df(dir)
             datasets.append(df)
             pbar.update(1)
 
@@ -84,6 +94,8 @@ def preprocess_data(df):
 
 class StateActionDataset(Dataset):
     def __init__(self, df):
+        # the last step in an episode as None for next_state_img. we keep them around in the dataframe for writing out the new dataset but we don't use them for training the classifier
+        df = df[df.next_state_img.notna()]
         self.df = df
 
     def __len__(self):
@@ -172,10 +184,10 @@ def main(args):
     t0 = time.perf_counter()
     print(f"Loading data from {args.data_dir}")
 
-    if len(glob.glob(os.path.join(args.data_dir, "**/*.parquet"))) > 0:
+    if len(glob.glob(os.path.join(args.data_dir, "**/*.parquet"))) > 0 or len(glob.glob(os.path.join(args.data_dir, "*.parquet"))) > 0:
         df = load_data_from_parquet(args.data_dir)
         df = preprocess_data(df)
-    elif len(glob.glob(os.path.join(args.data_dir, "**/*.pt"))) > 0:
+    elif len(glob.glob(os.path.join(args.data_dir, "**/*.pt"))) > 0 or len(glob.glob(os.path.join(args.data_dir, "*.pt"))) > 0:
         df = load_data_from_dataset(args.data_dir)
     else:
         raise ValueError(f"No parquet or dataset files found in {args.data_dir}")
@@ -183,6 +195,8 @@ def main(args):
     print(f"Data {len(df)} datapoints {len(df)//args.batch_size} batches per epoch loaded in {time.perf_counter() - t0:.2f} seconds")
 
     train_df, test_df = train_test_split(df, train_size=args.train_size, random_state=42)
+    train_df['split'] = ['train']*len(train_df)
+    test_df['split'] = ['test']*len(test_df)
 
     print(f"Train size: {len(train_df)} Test size: {len(test_df)}")
 
@@ -199,6 +213,109 @@ def main(args):
 
     train_model(model, train_loader, test_loader, criterion, optimizer, args.epochs, device)
 
+    if args.write_new_dataset_dir is not None:
+        write_new_dataset(train_df, test_df, model)
+
+@torch.no_grad()
+def write_new_dataset(train_df, test_df, model):
+    model.eval()
+
+    ds = Dataset(args.write_new_dataset_dir)
+
+    df = pd.concat([train_df, test_df], ignore_index=True)
+
+    pbar = tqdm.tqdm(total=len(df))
+
+    episodes = defaultdict(list)
+
+    num_right = 0
+
+    for dir in df.dir.unique():
+        dir_df = df[df.dir == dir]
+
+        for episode_id in dir_df.episode_id.unique():
+            episode_df = dir_df[dir_df.episode_id == episode_id]
+
+            step_ids = sorted(episode_df.step_id.tolist())
+            max_step_id = step_ids[-1]
+            assert step_ids == list(range(max_step_id+1))
+
+            for step_id in step_ids:
+                row = episode_df[episode_df.step_id == step_id].iloc[0]
+
+                obs = row['state_img']
+                act = row['action']
+                episode_id = row['episode_id']
+                rew = row['reward']
+                end = row['end']
+                trunc = row['trunc']
+
+                if row['split'] == 'test' and row['next_state_img'] != None:
+                    delta = (row['next_state_img']-row['state_img']).to(args.gpu).unsqueeze(0)
+                    act = model(delta).argmax().item()
+                    if act == row['action']:
+                        num_right += 1
+
+                episodes[f"{dir}_{episode_id}"].append((obs, act, rew, end, trunc))
+
+                pbar.update(1)
+
+    pbar.close()
+
+    pbar = tqdm.tqdm(total=len(episodes))
+
+    for episode in episodes.values():
+        obs = []
+        act = []
+        rew = []
+        end = []
+        trunc = []
+
+        for step in episode:
+            obs.append(step[0])
+            act.append(step[1])
+            rew.append(step[2])
+            end.append(step[3])
+            trunc.append(step[4])
+
+        obs = torch.stack(obs)
+        act = torch.tensor(act, dtype=torch.long)
+        rew = torch.stack(rew)
+        end = torch.stack(end)
+        trunc = torch.stack(trunc)
+
+        assert obs.ndim == 4
+        assert act.ndim == 1
+        assert rew.ndim == 1
+        assert end.ndim == 1
+        assert trunc.ndim == 1
+
+        assert obs.dtype == torch.float32
+        assert act.dtype == torch.int64
+        assert rew.dtype == torch.float32
+        assert end.dtype == torch.uint8
+        assert trunc.dtype == torch.uint8
+
+        assert obs.shape[0] == act.shape[0] 
+        assert obs.shape[0] == rew.shape[0] 
+        assert obs.shape[0] == end.shape[0] 
+        assert obs.shape[0] == trunc.shape[0]
+
+        episode = Episode(obs, act, rew, end, trunc, {})
+
+        ds.add_episode(episode)
+
+        pbar.update(1)
+
+    pbar.close()
+
+    print(f"Num right: {num_right}/{len(test_df)} {num_right/len(test_df):.2f}")
+
+    assert len(df) == len(ds)
+
+    ds.is_static = True
+    ds.save_to_default_path()
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train an image classifier for state-action prediction")
     parser.add_argument("--data_dir", type=str, default="/mnt/raid/orca_rl/trajectory_samples", help="Directory containing parquet files")
@@ -209,8 +326,13 @@ if __name__ == "__main__":
     parser.add_argument("--gpu", type=int, default=7, help="GPU ID to use (default: None, use CPU)")
     parser.add_argument("--checkpoint_dir", type=str, default="action_labelers", help="Directory to save checkpoints")
     parser.add_argument("--train_size", type=float, default=0.95, help="Proportion of data to use for training")
+    parser.add_argument("--write_new_dataset_dir", type=str, default=None, help="If set, write a new dataset to this directory")
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
+
+    if args.write_new_dataset_dir is not None:
+        if os.path.exists(args.write_new_dataset_dir):
+            print(f"WARNING: {args.write_new_dataset_dir} already exists. IDK what diamond does with that. You probably just want to delete it first to be sure you cleanly overwrite it.")
 
     main(args)
