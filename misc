@@ -1,11 +1,11 @@
 docker run -it --gpus all --ipc=host -v /mnt/raid:/mnt/raid -v "$(pwd)":/workspace pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime bash
 apt-get update && apt-get install ffmpeg libsm6 libxext6 -y && pip install -r requirements.txt
 
-python src/play.py --pretrained --record --recording-dir ./breakout_recordings --default-env test --game 7 --headless-collect-n 1000
+python src/play.py --pretrained --record --recording-dir ./breakout_recordings --default-env test --game 7 --headless-collect-n-episodes 1000
 python src/train_action_labeler.py --data_dir ./breakout_recordings/
 python src/main.py env.train.id=BreakoutNoFrameskip-v4 common.device=cuda:0
 
-python src/play.py --pretrained --record --recording-dir ./pong_recordings --default-env test --game 20 --headless-collect-n 400 --device cuda:1
+python src/play.py --pretrained --record --recording-dir ./pong_recordings --default-env test --game 20 --headless-collect-n-episodes 400 --device cuda:1
 python src/train_action_labeler.py --data_dir ./pong_recordings/ --device cuda:1
 python src/main.py env.train.id=PongNoFrameskip-v4 common.device=cuda:1
 
@@ -27,7 +27,7 @@ python src/play.py --path-ckpt /Users/williamberman/Downloads/agent_epoch_00004.
 python src/play.py \
  --path-ckpt /Users/williamberman/Downloads/agent_epoch_00001.pt \
  --game Pong \
- --headless-collect-n 100 \
+ --headless-collect-n-episodes 100 \
  --default-env test \
  --write-rewards ./reward_data/pong_rewards.json
 ```
@@ -35,7 +35,7 @@ python src/play.py \
 python src/play.py \
  --path-ckpt /Users/williamberman/Downloads/agent_epoch_00004.pt \
  --game Breakout \
- --headless-collect-n 100 \
+ --headless-collect-n-episodes 100 \
  --default-env test \
  --write-rewards ./reward_data/breakout_rewards.json
 ```
@@ -44,12 +44,22 @@ python src/play.py \
 python src/play.py \
  --path-ckpt /Users/williamberman/Downloads/agent_epoch_00004.pt \
  --game Breakout \
- --headless-collect-n 4 \
- --headless-collect-n-threads 2 \
+ --headless-collect-n-episodes 4 \
+ --headless-collect-n-episodes-threads 2 \
  --default-env test \
  --write-rewards ./reward_data/breakout_rewards.json
 ```
 
 ```bash
 python src/compute_atari_100k.py --dir-for-my-scores ./reward_data
+```
+
+```bash
+python src/play.py \
+--pretrained \
+--record \
+--recording-dir /mnt/raid/diamond/better2/breakout_recordings \
+--default-env test \
+--game Breakout \
+--headless-collect-n-steps 100000
 ```

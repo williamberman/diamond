@@ -21,7 +21,7 @@ import tqdm
 import math
 import os
 
-# python src/play.py --pretrained --record --recording-dir ./test_recording --default-env test --game 7 --headless-collect-n 100
+# python src/play.py --pretrained --record --recording-dir ./test_recording --default-env test --game 7 --headless-collect-n-episodes 100
 # cd src
 """
 from data import Dataset, SegmentId
@@ -53,7 +53,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recording-dir", type=str, default=None, help="Directory to store recordings.")
     parser.add_argument("--default-env", choices=["wm", "test", "train"], default="wm", help="Default environment.")
     parser.add_argument("--game", type=str, default=None, help="Game to play.")
-    parser.add_argument("--headless-collect-n", type=int, default=None, help="Number of episodes to collect in headless mode.")
+    parser.add_argument("--headless-collect-n-episodes", type=int, default=None, help="Number of episodes to collect in headless mode.")
+    parser.add_argument("--headless-collect-n-steps", type=int, default=None, help="Number of stepsto collect in headless mode.")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="Device to use.")
     parser.add_argument("--path-ckpt", type=str, default=None, help="Path to the checkpoint.")
     parser.add_argument("--horizon", type=int, default=50, help="Horizon for the world model environment.")
@@ -195,14 +196,20 @@ def main():
     with initialize(version_base="1.3", config_path="../config"):
         cfg = compose(config_name="trainer")
 
-    if args.headless_collect_n is not None:
-        print(f"Collecting {args.headless_collect_n} episodes in headless mode.")
+    if args.headless_collect_n_episodes is not None or args.headless_collect_n_steps is not None:
+        if args.headless_collect_n_episodes is not None:
+            print(f"Collecting {args.headless_collect_n_episodes} episodes in headless mode.")
+        else:
+            print(f"Collecting {args.headless_collect_n_steps} steps in headless mode.")
+
         assert not args.dataset_mode
 
-        n_threads = args.headless_collect_n_threads
-        n_per_thread = math.ceil(args.headless_collect_n / n_threads)
-
-        pbar = tqdm.tqdm(total=n_threads * n_per_thread)
+        if args.headless_collect_n_episodes is not None:
+            pbar = tqdm.tqdm(total=args.headless_collect_n_threads * math.ceil(args.headless_collect_n_episodes / args.headless_collect_n_threads))
+        elif args.headless_collect_n_steps is not None:
+            pbar = tqdm.tqdm(total=args.headless_collect_n_threads * math.ceil(args.headless_collect_n_steps / args.headless_collect_n_threads))
+        else:
+            assert False
 
         def do(thread_id):
             env, _ = prepare_play_mode(cfg, args, thread_id)
@@ -210,27 +217,52 @@ def main():
             assert not env.is_human_player
 
             rewards = []
+            episode_ctr = 0
+            step_ctr = 0
 
-            for episode in range(n_per_thread):
+            while True:
                 env.reset()
                 rewards.append(0)
 
                 while True:
                     _, rew, end, trunc, _ = env.step(0)
                     rewards[-1] += rew.item()
+                    step_ctr += 1
+
+                    if args.headless_collect_n_steps is not None:
+                        pbar.update(1)
+
                     if end or trunc:
                         break
 
-                print(f"Episode {episode} reward: {rewards[-1]} average reward: {sum(rewards) / len(rewards):.2f}")
+                    if args.headless_collect_n_steps is not None:
+                        if step_ctr >= math.ceil(args.headless_collect_n_steps / args.headless_collect_n_threads):
+                            env.add_cur_episode_to_dataset()
+                            break
 
-                pbar.update(1)
+                print(f"{thread_id}: Episode {episode_ctr} step {step_ctr} reward: {rewards[-1]} average reward: {sum(rewards) / len(rewards):.2f}")
+
+                if args.headless_collect_n_episodes is not None:
+                    pbar.update(1)
+
+                episode_ctr += 1
+                
+                if args.headless_collect_n_episodes is not None:
+                    if episode_ctr >= math.ceil(args.headless_collect_n_episodes / args.headless_collect_n_threads):
+                        break
+                elif args.headless_collect_n_steps is not None:
+                    print(f"{thread_id}: step_ctr: {step_ctr} >= {math.ceil(args.headless_collect_n_steps / args.headless_collect_n_threads)}")
+                    if step_ctr >= math.ceil(args.headless_collect_n_steps / args.headless_collect_n_threads):
+                        break
+                else:
+                    assert False
 
             return rewards
 
         all_rewards = []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
-            futures = [executor.submit(do, i) for i in range(n_threads)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.headless_collect_n_threads) as executor:
+            futures = [executor.submit(do, i) for i in range(args.headless_collect_n_threads)]
             for future in concurrent.futures.as_completed(futures):
                 all_rewards.extend(future.result())
 

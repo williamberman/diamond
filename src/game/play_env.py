@@ -162,13 +162,15 @@ class PlayEnv:
                 original_obs = (torch.tensor(env_info["original_obs"][0]).permute(2, 0, 1).unsqueeze(0).contiguous())
                 self.buffer["info"]["original_obs"].append(original_obs)
             if end or trunc:
-                ep_dict = {k: torch.cat(v, dim=0) for k, v in self.buffer.items() if k != "info"}
-                ep_info = {k: torch.cat(v, dim=0) for k, v in self.buffer["info"].items()}
-                ep = Episode(**ep_dict, info=ep_info).to("cpu")
-                self.rec_dataset.add_episode(ep)
-                self.rec_dataset.save_to_default_path()
-
+                self.add_cur_episode_to_dataset()
         self.obs = next_obs
         self.t += 1
 
         return next_obs, rew, end, trunc, info
+
+    def add_cur_episode_to_dataset(self):
+        ep_dict = {k: torch.cat(v, dim=0) for k, v in self.buffer.items() if k != "info"}
+        ep_info = {k: torch.cat(v, dim=0) for k, v in self.buffer["info"].items()}
+        ep = Episode(**ep_dict, info=ep_info).to("cpu")
+        self.rec_dataset.add_episode(ep)
+        self.rec_dataset.save_to_default_path()
