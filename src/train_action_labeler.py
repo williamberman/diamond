@@ -124,6 +124,7 @@ def evaluate_model(model, data_loader, criterion, device):
     
     avg_loss = total_loss / len(data_loader)
     accuracy = 100 * correct / total
+    model.train()
     return avg_loss, accuracy
 
 def train_model(model, train_loader, test_loader, criterion, optimizer, num_epochs, device):
@@ -145,13 +146,17 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
             if step % 100 == 0:
                 print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, Train Loss: {loss.item():.4f} grad_norm: {grad_norm.item():.4f}')
 
-        test_loss, test_accuracy = evaluate_model(model, test_loader, criterion, device)
-        print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, '
-              f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%')
-        model.train()  # Switch back to training mode
+        if (epoch+1) % 5 == 0 or epoch == num_epochs - 1:
+            train_loss, train_accuracy = evaluate_model(model, train_loader, criterion, device)
+            test_loss, test_accuracy = evaluate_model(model, test_loader, criterion, device)
+        else:
+            train_loss, train_accuracy = 0, 0
+            test_loss, test_accuracy = 0, 0
 
-        avg_train_loss = total_train_loss / steps_per_epoch
-        print(f'Epoch {epoch+1}/{num_epochs} completed, Average Train Loss: {avg_train_loss:.4f}')
+        print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, '
+              f'Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.2f}%, '
+              f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}% '
+              f'Avg Train Loss over epoch: {total_train_loss / steps_per_epoch:.4f} ')
     
         torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"action_labeler_{epoch+1}.pt"))
 
@@ -177,7 +182,9 @@ def main(args):
 
     print(f"Data {len(df)} datapoints {len(df)//args.batch_size} batches per epoch loaded in {time.perf_counter() - t0:.2f} seconds")
 
-    train_df, test_df = train_test_split(df, test_size=0.05, random_state=42)
+    train_df, test_df = train_test_split(df, train_size=args.train_size, random_state=42)
+
+    print(f"Train size: {len(train_df)} Test size: {len(test_df)}")
 
     train_dataset = StateActionDataset(train_df)
     test_dataset = StateActionDataset(test_df)
@@ -198,9 +205,10 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
     parser.add_argument("--image_size", type=int, default=160, help="Height to resize images to (width will be adjusted to maintain aspect ratio)")
     parser.add_argument("--epochs", type=int, default=20, help="Number of epochs to train")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--gpu", type=int, default=7, help="GPU ID to use (default: None, use CPU)")
     parser.add_argument("--checkpoint_dir", type=str, default="action_labelers", help="Directory to save checkpoints")
+    parser.add_argument("--train_size", type=float, default=0.95, help="Proportion of data to use for training")
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
