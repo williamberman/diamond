@@ -42,10 +42,11 @@ collection:
       max: 10000  # null: no maximum
       threshold_rew: 10
     steps_per_epoch: 100
-    action_labeler:
-      _target_: models.ImprovedCNN
-      num_classes: null
-    action_labeler_checkpoint: "/workspace/action_labeler_2.pt"
+    # action_labeler:
+    #   _target_: models.ImprovedCNN
+    #   num_classes: null
+    # action_labeler_checkpoint: "/workspace/action_labeler_2.pt"
+    action_labeler: null
   test:
     num_envs: 1
     num_episodes: 20
@@ -58,7 +59,7 @@ training:
   cache_in_ram: True
   num_workers_data_loaders: 0
   model_free: False # if True, turn off world_model training and RL in imagination
-  compile_wm: False
+  compile_wm: True
 
 evaluation:
   should: True

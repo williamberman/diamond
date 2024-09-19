@@ -103,6 +103,7 @@ class Trainer(StateDictMixin):
         # Create models
         num_actions = int(test_env.num_actions)
         self.agent = Agent(instantiate(cfg.agent, num_actions=num_actions)).to(self._device)
+        self.agent.denoiser.compute_loss = torch.compile(self.agent.denoiser.compute_loss, mode="reduce-overhead")
 
         if cfg.initialization.path_to_ckpt is not None:
             self.agent.load(**cfg.initialization)
@@ -328,6 +329,7 @@ class Trainer(StateDictMixin):
             if self.epoch > cfg.start_after_epochs:
                 steps = cfg.steps_first_epoch if self.epoch == 1 else cfg.steps_per_epoch
                 to_log += self.train_component(name, steps)
+            self.save_checkpoint()
         return to_log
 
     @torch.no_grad()
