@@ -86,9 +86,13 @@ class Trainer(StateDictMixin):
         # Datasets
         num_workers = cfg.training.num_workers_data_loaders
         use_manager = cfg.training.cache_in_ram and (num_workers > 0)
-        p = Path(cfg.collection.path_to_static_dataset) if self._is_static_dataset else Path("dataset")
-        self.train_dataset = Dataset(p / "train", "train_dataset", cfg.training.cache_in_ram, use_manager)
-        self.test_dataset = Dataset(p / "test", "test_dataset", cache_in_ram=True)
+
+        if self._is_static_dataset:
+            self.train_dataset = Dataset(Path(cfg.collection.path_to_static_dataset), "train_dataset", cfg.training.cache_in_ram, use_manager)
+        else:
+            self.train_dataset = Dataset(Path("dataset/test"), "train_dataset", cfg.training.cache_in_ram, use_manager)
+
+        self.test_dataset = Dataset(Path("dataset/test"), "test_dataset", cache_in_ram=True)
         self.train_dataset.load_from_default_path()
         self.test_dataset.load_from_default_path()
 

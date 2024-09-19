@@ -54,7 +54,7 @@ collection:
 
 training:
   should: True
-  num_final_epochs: 50
+  num_final_epochs: 1
   cache_in_ram: True
   num_workers_data_loaders: 0
   model_free: False # if True, turn off world_model training and RL in imagination
@@ -84,7 +84,7 @@ denoiser:
   training:
     num_autoregressive_steps: 1
     start_after_epochs: 0
-    steps_first_epoch: 10000
+    steps_first_epoch: 410_000
     steps_per_epoch: 400
     sample_weights: [0.1, 0.1, 0.1, 0.7]
     batch_size: 32
@@ -108,7 +108,7 @@ rew_end_model:
   training:
     seq_length: ${eval:'${world_model_env.horizon} + ${agent.denoiser.inner_model.num_steps_conditioning}'}
     start_after_epochs: 0
-    steps_first_epoch: 10000
+    steps_first_epoch: 410_000
     steps_per_epoch: 400
     sample_weights: ${denoiser.training.sample_weights}
     batch_size: 32
@@ -127,7 +127,7 @@ actor_critic:
     batch_size: 32
     grad_acc_steps: 1
     start_after_epochs: 0
-    steps_first_epoch: 5000
+    steps_first_epoch: 405_000
     steps_per_epoch: 400
     lr_warmup_steps: 100
     max_grad_norm: 100.0
