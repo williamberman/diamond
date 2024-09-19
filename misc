@@ -62,4 +62,10 @@ python src/play.py \
 --default-env test \
 --game Breakout \
 --headless-collect-n-steps 100000
+
+python src/train_action_labeler.py \
+    --epochs 3 \
+    --checkpoint_dir /mnt/raid/diamond/better2/Breakout_action_labelers_100k \
+    --data_dir /mnt/raid/diamond/better2/Breakout_recordings_100k/ \
+    --train_size 0.1
 ```
