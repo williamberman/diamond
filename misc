@@ -69,4 +69,12 @@ python src/train_action_labeler.py \
     --data_dir /mnt/raid/diamond/better2/Breakout_recordings_100k/ \
     --train_size 0.1 \
     --write_new_dataset_dir /mnt/raid/diamond/better2/Breakout_recordings_100k_0.1_labeled/
+
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    hydra.run.dir=/mnt/raid/diamond/better2/Breakout_100k_0.1_labeled \
+    collection.train.action_labeler_checkpoint="/mnt/raid/diamond/better2/Breakout_action_labelers_100k/action_labeler_final.pt" \
+    wandb.name=Breakout_100k_0.1_labeled \
+    collection.path_to_static_dataset=/mnt/raid/diamond/better2/Breakout_recordings_100k_0.1_labeled/ \
+    common.device=cuda:0
 ```
