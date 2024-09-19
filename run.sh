@@ -9,7 +9,7 @@ python src/play.py \
     --pretrained \
     --record \
     --default-env test \
-    --headless-collect-n 400 \
+    --headless-collect-n-episodes 400 \
     --game $game \
     --recording-dir /mnt/raid/diamond/better/${game}_recordings/ \
     --device cuda:${device}

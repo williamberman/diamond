@@ -58,7 +58,7 @@ python src/compute_atari_100k.py --dir-for-my-scores ./reward_data
 python src/play.py \
 --pretrained \
 --record \
---recording-dir /mnt/raid/diamond/better2/breakout_recordings \
+--recording-dir /mnt/raid/diamond/better2/Breakout_recordings_100k \
 --default-env test \
 --game Breakout \
 --headless-collect-n-steps 100000
@@ -67,5 +67,6 @@ python src/train_action_labeler.py \
     --epochs 3 \
     --checkpoint_dir /mnt/raid/diamond/better2/Breakout_action_labelers_100k \
     --data_dir /mnt/raid/diamond/better2/Breakout_recordings_100k/ \
-    --train_size 0.1
+    --train_size 0.1 \
+    --write_new_dataset_dir /mnt/raid/diamond/better2/Breakout_recordings_100k_0.1_labeled/
 ```
