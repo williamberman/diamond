@@ -202,11 +202,11 @@ def main(args):
 
     train_dataset = StateActionDataset(train_df)
     test_dataset = StateActionDataset(test_df)
-    train_loader = DataLoader(train_dataset, num_workers=args.batch_size, batch_size=args.batch_size, shuffle=True)
+    train_loader = DataLoader(train_dataset, num_workers=0, batch_size=args.batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, num_workers=0, batch_size=args.batch_size, shuffle=False)
 
     num_classes = df['action'].max() + 1
-    model = ImprovedCNN(num_classes).to(device)
+    model = ImprovedCNN(num_classes).to(device).train()
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
