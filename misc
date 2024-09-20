@@ -91,7 +91,7 @@ python src/main.py \
     collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_100/ \
     common.device=cuda:0 \
     denoiser.train=True \
-    rew_end_model.train=True\
+    rew_end_model.train=True \
     actor_critic.train=False
 
 python src/main.py \
@@ -101,6 +101,6 @@ python src/main.py \
     collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_1000/ \
     common.device=cuda:1 \
     denoiser.train=True \
-    rew_end_model.train=True\
+    rew_end_model.train=True \
     actor_critic.train=False
 ```
