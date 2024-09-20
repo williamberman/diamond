@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--write-rewards", type=str, default=None, help="Path to write rewards.")
     parser.add_argument("--headless-collect-n-threads", type=int, default=20, help="Number of threads to collect in headless mode.")
     parser.add_argument("--eps", type=float, default=None, help="Epsilon for random action selection.")
+    parser.add_argument("--only-reset-after-n-deaths", type=int, default=None, help="Only reset after n deaths.")
     return parser.parse_args()
 
 
@@ -284,7 +285,7 @@ def main():
     else:
         env, keymap = prepare_dataset_mode(cfg) if args.dataset_mode else prepare_play_mode(cfg, args)
         size = (args.size // cfg.env.train.size) * cfg.env.train.size  # window size
-        game = Game(env, keymap, (size, size), fps=args.fps, verbose=not args.no_header)
+        game = Game(env, keymap, (size, size), fps=args.fps, verbose=not args.no_header, only_reset_after_n_deaths=args.only_reset_after_n_death)
         game.run()
 
 

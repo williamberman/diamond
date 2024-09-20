@@ -17,12 +17,14 @@ class Game:
         size: Tuple[int, int],
         fps: int,
         verbose: bool,
+        only_reset_after_n_deaths= None
     ) -> None:
         self.env = play_env
         self.keymap = keymap
         self.height, self.width = size
         self.fps = fps
         self.verbose = verbose
+        self.only_reset_after_n_deaths = only_reset_after_n_deaths
 
         print("\nControls (general):\n")
         print("⏎ : reset env")
@@ -58,13 +60,16 @@ class Game:
             screen.blit(surface, (0, header_height))
 
         def reset():
-            nonlocal obs, info, do_reset, ep_return, ep_length
+            nonlocal obs, info, do_reset, ep_return, ep_length, death_ctr
             obs, info = self.env.reset()
             do_reset = False
             ep_return = 0
             ep_length = 0
+            death_ctr = 0
 
         obs, info, do_reset, ep_return, ep_length = (None,) * 5
+
+        death_ctr = 0
 
         reset()
         do_wait = False
@@ -144,7 +149,12 @@ class Game:
             clock.tick(self.fps)  # ensures game maintains the given frame rate
 
             if end or trunc:
-                reset()
+                if self.only_reset_after_n_deaths is not None:
+                    death_ctr += 1
+                    if death_ctr >= self.only_reset_after_n_deaths:
+                        reset()
+                else:
+                    reset()
 
             else:
                 obs = next_obs
