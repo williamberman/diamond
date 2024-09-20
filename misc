@@ -64,6 +64,7 @@ python src/play.py \
 --eps 0.1 \
 --store-final-obs
 
+# 60%
 python src/train_action_labeler.py \
     --epochs 1000 \
     --checkpoint_dir /mnt/raid/diamond/better4/Breakout_action_labelers_100k_100 \
@@ -73,6 +74,7 @@ python src/train_action_labeler.py \
     --eval_every_n_epochs 200 \
     --lr 1e-4
 
+# 72.02%
 python src/train_action_labeler.py \
     --epochs 1000 \
     --checkpoint_dir /mnt/raid/diamond/better4/Breakout_action_labelers_100k_100 \
@@ -84,8 +86,21 @@ python src/train_action_labeler.py \
 
 python src/main.py \
     env.train.id=BreakoutNoFrameskip-v4 \
-    hydra.run.dir=/mnt/raid/diamond/better2/Breakout_100k_0.1_labeled \
-    wandb.name=Breakout_100k_0.1_labeled \
-    collection.path_to_static_dataset=/mnt/raid/diamond/better2/Breakout_recordings_100k_0.1_labeled/ \
-    common.device=cuda:0
+    hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_100_denoiser \
+    wandb.name=Breakout_100k_labeled_100_denoiser \
+    collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_100/ \
+    common.device=cuda:0 \
+    denoiser.train=True \
+    rew_end_model.train=True\
+    actor_critic.train=False
+
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_1000_denoiser \
+    wandb.name=Breakout_100k_labeled_1000_denoiser \
+    collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_1000/ \
+    common.device=cuda:1 \
+    denoiser.train=True \
+    rew_end_model.train=True\
+    actor_critic.train=False
 ```

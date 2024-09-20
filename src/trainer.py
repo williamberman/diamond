@@ -323,7 +323,18 @@ class Trainer(StateDictMixin):
         self.agent.train()
         self.agent.zero_grad()
         to_log = []
-        model_names = ["actor_critic"] if self._is_model_free else self._model_names
+
+        model_names = []
+
+        if self._cfg.denoiser.train:
+            model_names.append("denoiser")
+
+        if self._cfg.rew_end_model.train:
+            model_names.append("rew_end_model")
+
+        if self._cfg.actor_critic.train:
+            model_names.append("actor_critic")
+
         for name in model_names:
             cfg = getattr(self._cfg, name).training
             if self.epoch > cfg.start_after_epochs:
