@@ -1,5 +1,5 @@
 docker run -it --gpus all --ipc=host -v /mnt/raid:/mnt/raid -v "$(pwd)":/workspace pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime bash
-apt-get update && apt-get install ffmpeg libsm6 libxext6 -y && pip install -r requirements.txt
+apt-get update && apt-get install ffmpeg libsm6 libxext6 git -y && pip install -r requirements.txt
 
 python src/play.py --pretrained --record --recording-dir ./breakout_recordings --default-env test --game 7 --headless-collect-n-episodes 1000
 python src/train_action_labeler.py --data_dir ./breakout_recordings/
@@ -58,17 +58,29 @@ python src/compute_atari_100k.py --dir-for-my-scores ./reward_data
 python src/play.py \
 --pretrained \
 --record \
---recording-dir /mnt/raid/diamond/better2/Breakout_recordings_100k \
---default-env test \
+--recording-dir /mnt/raid/diamond/better4/Breakout_recordings_100k \
 --game Breakout \
---headless-collect-n-steps 100000
+--headless-collect-n-steps 100000 \
+--eps 0.1 \
+--store-final-obs
 
 python src/train_action_labeler.py \
-    --epochs 3 \
-    --checkpoint_dir /mnt/raid/diamond/better2/Breakout_action_labelers_100k \
-    --data_dir /mnt/raid/diamond/better2/Breakout_recordings_100k/ \
-    --train_size 0.1 \
-    --write_new_dataset_dir /mnt/raid/diamond/better2/Breakout_recordings_100k_0.1_labeled/
+    --epochs 1000 \
+    --checkpoint_dir /mnt/raid/diamond/better4/Breakout_action_labelers_100k_100 \
+    --data_dir /mnt/raid/diamond/better4/Breakout_recordings_100k/ \
+    --train_size 0.001 \
+    --write_new_dataset_dir /mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_100/ \
+    --eval_every_n_epochs 200 \
+    --lr 1e-4
+
+python src/train_action_labeler.py \
+    --epochs 1000 \
+    --checkpoint_dir /mnt/raid/diamond/better4/Breakout_action_labelers_100k_100 \
+    --data_dir /mnt/raid/diamond/better4/Breakout_recordings_100k/ \
+    --train_size 0.01 \
+    --write_new_dataset_dir /mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_1000/ \
+    --eval_every_n_epochs 200 \
+    --lr 1e-4
 
 python src/main.py \
     env.train.id=BreakoutNoFrameskip-v4 \
