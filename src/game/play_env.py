@@ -1,5 +1,6 @@
 from collections import defaultdict, namedtuple
 import math
+import random
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -27,6 +28,7 @@ class PlayEnv:
         recording_mode: bool,
         store_denoising_trajectory: bool,
         store_original_obs: bool,
+        store_final_obs: bool,
         recording_dir: str=None
     ) -> None:
         self.agent = agent
@@ -36,6 +38,7 @@ class PlayEnv:
         self.recording_mode = recording_mode
         self.store_denoising_trajectory = store_denoising_trajectory
         self.store_original_obs = store_original_obs
+        self.store_final_obs = store_final_obs
         self.is_human_player = False
         self.env_id = 0
         self.env_name, self.env = self.envs[0]
@@ -114,13 +117,17 @@ class PlayEnv:
         return self.obs, None
 
     @torch.no_grad()
-    def step(self, act: int) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Any]]:
+    def step(self, act: int, eps=None, on_last_life=None) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Any]]:
         if self.is_human_player:
+            assert eps is None
             act = torch.tensor([act], device=self.agent.device)
         else:
             logits_act, value, self.hx_cx = self.agent.actor_critic(self.obs, self.hx_cx)
             dst = torch.distributions.categorical.Categorical(logits=logits_act)
-            act = dst.sample()
+            if eps is not None and random.random() < eps:
+                act = torch.tensor([random.randint(0, logits_act.shape[-1] - 1)], device=logits_act.device)
+            else:
+                act = dst.sample()
             entropy = dst.entropy() / math.log(2)
         entropy = None if self.is_human_player else f"{entropy.item():.2f}"
         value = None if self.is_human_player else f"{value.item():.2f}"
@@ -147,7 +154,7 @@ class PlayEnv:
                 f"Value  : {value}",
             ],
         ]
-        info = {"header": header}
+        info = {"header": header, "lives": env_info["lives"]}
 
         if end or trunc:
             d = "Dead" if end else ("Horizon" if self.is_wm_env() else "Timed out")
@@ -161,8 +168,14 @@ class PlayEnv:
             if self.store_original_obs and "original_obs" in env_info:
                 original_obs = (torch.tensor(env_info["original_obs"][0]).permute(2, 0, 1).unsqueeze(0).contiguous())
                 self.buffer["info"]["original_obs"].append(original_obs)
-            if end or trunc:
-                self.add_cur_episode_to_dataset()
+            if self.store_final_obs and "final_observation" in env_info:
+                self.buffer["info"]["final_observation"] = [env_info["final_observation"].squeeze(0).contiguous().to('cpu')]
+            if on_last_life is not None:
+                if on_last_life and (end or trunc):
+                    self.add_cur_episode_to_dataset()
+            else:
+                if end or trunc:
+                    self.add_cur_episode_to_dataset()
         self.obs = next_obs
         self.t += 1
 

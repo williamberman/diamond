@@ -47,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-n", "--num-steps-initial-collect", type=int, default=1000, help="Num steps initial collect.")
     parser.add_argument("--store-denoising-trajectory", action="store_true", help="Save denoising steps in info.")
     parser.add_argument("--store-original-obs", action="store_true", help="Save original obs (pre resizing) in info.")
+    parser.add_argument("--store-final-obs", action="store_true", help="Save final obs in info.")
     parser.add_argument("--fps", type=int, default=15, help="Frame rate.")
     parser.add_argument("--size", type=int, default=640, help="Window size.")
     parser.add_argument("--no-header", action="store_true")
@@ -60,6 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--horizon", type=int, default=50, help="Horizon for the world model environment.")
     parser.add_argument("--write-rewards", type=str, default=None, help="Path to write rewards.")
     parser.add_argument("--headless-collect-n-threads", type=int, default=20, help="Number of threads to collect in headless mode.")
+    parser.add_argument("--eps", type=float, default=None, help="Epsilon for random action selection.")
     return parser.parse_args()
 
 
@@ -76,6 +78,9 @@ def check_args(args: argparse.Namespace) -> None:
     else:
         if not args.record and (args.store_denoising_trajectory or args.store_original_obs):
             print("Warning: not in recording mode, ignoring --store* options")
+    
+    if args.headless_collect_n_episodes is not None or args.headless_collect_n_steps is not None:
+        args.default_env = "train"
     return True
 
 
@@ -180,6 +185,7 @@ def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace, thread_id=None)
         args.record,
         args.store_denoising_trajectory,
         args.store_original_obs,
+        args.store_final_obs,
         recording_dir,
     )
 
@@ -223,16 +229,19 @@ def main():
             while True:
                 env.reset()
                 rewards.append(0)
+                info = None
 
                 while True:
-                    _, rew, end, trunc, _ = env.step(0)
+                    on_last_life = info is not None and info["lives"].item() == 1
+
+                    _, rew, end, trunc, info = env.step(0, eps=args.eps, on_last_life=on_last_life)
                     rewards[-1] += rew.item()
                     step_ctr += 1
 
                     if args.headless_collect_n_steps is not None:
                         pbar.update(1)
 
-                    if end or trunc:
+                    if on_last_life and (end or trunc):
                         break
 
                     if args.headless_collect_n_steps is not None:

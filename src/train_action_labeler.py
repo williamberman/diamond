@@ -227,6 +227,7 @@ def write_new_dataset(train_df, test_df, model):
     pbar = tqdm.tqdm(total=len(df))
 
     episodes = defaultdict(list)
+    episode_data = {}
 
     num_right = 0
 
@@ -234,6 +235,8 @@ def write_new_dataset(train_df, test_df, model):
         dir_df = df[df.dir == dir]
 
         for episode_id in dir_df.episode_id.unique():
+            episode_data[f"{dir}_{episode_id}"] = [dir, episode_id]
+
             episode_df = dir_df[dir_df.episode_id == episode_id]
 
             step_ids = sorted(episode_df.step_id.tolist())
@@ -263,8 +266,18 @@ def write_new_dataset(train_df, test_df, model):
     pbar.close()
 
     pbar = tqdm.tqdm(total=len(episodes))
+    datasets = {}
 
-    for episode in episodes.values():
+    for episode_key, episode in episodes.items():
+        dir, episode_id = episode_data[episode_key]
+
+        if dir not in datasets:
+            datasets[dir] = Dataset(dir)
+            datasets[dir].load_from_default_path()
+
+        dataset = datasets[dir]
+        info = dataset.load_episode(episode_id).info
+
         obs = []
         act = []
         rew = []
@@ -301,7 +314,7 @@ def write_new_dataset(train_df, test_df, model):
         assert obs.shape[0] == end.shape[0] 
         assert obs.shape[0] == trunc.shape[0]
 
-        episode = Episode(obs, act, rew, end, trunc, {})
+        episode = Episode(obs, act, rew, end, trunc, info)
 
         ds.add_episode(episode)
 
