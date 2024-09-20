@@ -158,7 +158,7 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
             if step % 100 == 0:
                 print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, Train Loss: {loss.item():.4f} grad_norm: {grad_norm.item():.4f}')
 
-        if (epoch+1) % 5 == 0 or epoch == num_epochs - 1:
+        if (epoch+1) % args.eval_every_n_epochs == 0 or epoch == num_epochs - 1:
             train_loss, train_accuracy = evaluate_model(model, train_loader, criterion, device)
             test_loss, test_accuracy = evaluate_model(model, test_loader, criterion, device)
         else:
@@ -340,6 +340,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_dir", type=str, default="action_labelers", help="Directory to save checkpoints")
     parser.add_argument("--train_size", type=float, default=0.95, help="Proportion of data to use for training")
     parser.add_argument("--write_new_dataset_dir", type=str, default=None, help="If set, write a new dataset to this directory")
+    parser.add_argument("--eval_every_n_epochs", type=int, default=5, help="Evaluate the model every n epochs")
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
