@@ -285,7 +285,7 @@ def main():
     else:
         env, keymap = prepare_dataset_mode(cfg) if args.dataset_mode else prepare_play_mode(cfg, args)
         size = (args.size // cfg.env.train.size) * cfg.env.train.size  # window size
-        game = Game(env, keymap, (size, size), fps=args.fps, verbose=not args.no_header, only_reset_after_n_deaths=args.only_reset_after_n_death)
+        game = Game(env, keymap, (size, size), fps=args.fps, verbose=not args.no_header, only_reset_after_n_deaths=args.only_reset_after_n_deaths)
         game.run()
 
 
