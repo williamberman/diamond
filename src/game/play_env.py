@@ -154,7 +154,9 @@ class PlayEnv:
                 f"Value  : {value}",
             ],
         ]
-        info = {"header": header, "lives": env_info["lives"]}
+        info = {"header": header}
+        if "lives" in env_info:
+            info["lives"] = env_info["lives"]
 
         if end or trunc:
             d = "Dead" if end else ("Horizon" if self.is_wm_env() else "Timed out")
