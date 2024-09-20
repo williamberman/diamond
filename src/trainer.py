@@ -236,9 +236,8 @@ class Trainer(StateDictMixin):
 
             # Evaluation
             should_test = self._cfg.evaluation.should and (self.epoch % self._cfg.evaluation.every == 0)
-            should_collect_test = should_test and not self._is_static_dataset
 
-            if should_collect_test:
+            if should_test:
                 to_log += self.collect_test()
 
             if should_test and not self._is_model_free:
@@ -306,10 +305,13 @@ class Trainer(StateDictMixin):
             print(f"  Episode {ep_id}: return = {ret} length = {length}\n", end="\n" if i == episodes - 1 else "")
 
         game = self._cfg.env.test.id.replace("NoFrameskip-v4", "")
-        atari_100k_score_hns = (np.array(returns).mean() - RANDOM_SCORES[game]) / (HUMAN_SCORES[game] - RANDOM_SCORES[game])
+        mean_return = np.array(returns).mean()
+        min_return = np.array(returns).min()
+        max_return = np.array(returns).max()
+        atari_100k_score_hns = (mean_return - RANDOM_SCORES[game]) / (HUMAN_SCORES[game] - RANDOM_SCORES[game])
         atari_100k_score_hns = atari_100k_score_hns.item()
-        print(f"Atari 100k hns score: {atari_100k_score_hns} min_score: {RANDOM_SCORES[game]} max_score: {HUMAN_SCORES[game]}")
-        to_log.append({"atari_100k_score_hns": atari_100k_score_hns})
+        print(f"Atari 100k hns score: {atari_100k_score_hns:.2f} mean_return: {mean_return:.2f} min_return: {min_return:.2f} max_return: {max_return:.2f}")
+        to_log.append({"atari_100k_score_hns": atari_100k_score_hns, "atari_100k_mean_return": mean_return, "atari_100k_min_return": min_return, "atari_100k_max_return": max_return})
 
         self.num_episodes_test += episodes
 
@@ -347,7 +349,16 @@ class Trainer(StateDictMixin):
     def test_agent(self) -> Logs:
         self.agent.eval()
         to_log = []
-        model_names = [] if self._is_model_free else self._model_names[:-1]
+        model_names = []
+
+        if self._cfg.denoiser.train:
+            model_names.append("denoiser")
+
+        if self._cfg.rew_end_model.train:
+            model_names.append("rew_end_model")
+
+        # we do not eval the actor critic here
+
         for name in model_names:
             cfg = getattr(self._cfg, name).training
             if self.epoch > cfg.start_after_epochs:
