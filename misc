@@ -84,6 +84,7 @@ python src/train_action_labeler.py \
     --eval_every_n_epochs 200 \
     --lr 1e-4
 
+# train the denoiser and rew_end_model for the 100 labeled dataset
 python src/main.py \
     env.train.id=BreakoutNoFrameskip-v4 \
     hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_100_denoiser \
@@ -94,6 +95,7 @@ python src/main.py \
     rew_end_model.train=True \
     actor_critic.train=False
 
+# train the denoiser and rew_end_model for the 1000 labeled dataset
 python src/main.py \
     env.train.id=BreakoutNoFrameskip-v4 \
     hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_1000_denoiser \
@@ -103,4 +105,28 @@ python src/main.py \
     denoiser.train=True \
     rew_end_model.train=True \
     actor_critic.train=False
+
+# train the actor critic for the 100 labeled dataset
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_100_actor_critic \
+    wandb.name=Breakout_100k_labeled_100_actor_critic \
+    collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_100/ \
+    common.device=cuda:0 \
+    denoiser.train=False \
+    rew_end_model.train=False \
+    actor_critic.train=True \
+    initialization.path_to_ckpt=/mnt/raid/diamond/better4/Breakout_100k_labeled_100_denoiser/checkpoints/agent_versions/agent_epoch_01000.pt
+
+# train the actor critic for the 1000 labeled dataset
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    hydra.run.dir=/mnt/raid/diamond/better4/Breakout_100k_labeled_1000_actor_critic \
+    wandb.name=Breakout_100k_labeled_1000_actor_critic \
+    collection.path_to_static_dataset=/mnt/raid/diamond/better4/Breakout_recordings_100k_labeled_1000/ \
+    common.device=cuda:1 \
+    denoiser.train=False \
+    rew_end_model.train=False \
+    actor_critic.train=True \
+    initialization.path_to_ckpt=/mnt/raid/diamond/better4/Breakout_100k_labeled_1000_denoiser/checkpoints/agent_versions/agent_epoch_01000.pt
 ```
