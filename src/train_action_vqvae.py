@@ -27,7 +27,7 @@ def main():
     dataloader = iter(DataLoader(TorchDataset(), batch_size=32, num_workers=0))
 
     model = ActionVQVAE().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=3e-5)
 
     step = 0
 
@@ -155,39 +155,37 @@ class TorchDataset(torch.utils.data.IterableDataset):
 class ActionVQVAE(nn.Module):
     def __init__(self):
         super().__init__()
-        self.in_proj = nn.Linear(3*(4**2), 512)
-        self.encoder = LlamaModel(LlamaConfig(
+        hidden_size = 256
+        num_attention_heads = 4
+        config = dict(
             vocab_size=None,
-            hidden_size=512,
-            intermediate_size=512*4,
-            num_hidden_layers=8,
-            num_attention_heads=8,
-            num_key_value_heads=8,
+            hidden_size=hidden_size,
+            intermediate_size=hidden_size*4,
+            num_hidden_layers=4,
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_attention_heads,
             hidden_act="silu",
-            max_position_embeddings=image_seq_len*(context_n_frames-1),
             attention_bias=False,
             attention_dropout=0.0,
             mlp_bias=False,
+        )
+        self.latent_dim = 16
+
+        self.in_proj = nn.Linear(3*(4**2), hidden_size)
+        self.encoder = LlamaModel(LlamaConfig(
+            **config,
+            max_position_embeddings=image_seq_len*(context_n_frames-1),
         ))
 
-        self.bottleneck = nn.Linear(512, 64)
-        self.quantizer = VectorQuantizer(n_e=4, e_dim=64, beta=0.25)
-        self.un_bottleneck = nn.Linear(64, 512)
+        self.bottleneck = nn.Linear(hidden_size, self.latent_dim)
+        self.quantizer = VectorQuantizer(n_e=4, e_dim=self.latent_dim, beta=0.25)
+        self.un_bottleneck = nn.Linear(self.latent_dim, hidden_size)
 
         self.decoder = LlamaModel(LlamaConfig(
-            vocab_size=None,
-            hidden_size=512,
-            intermediate_size=512*4,
-            num_hidden_layers=8,
-            num_attention_heads=8,
-            num_key_value_heads=8,
-            hidden_act="silu",
+            **config,
             max_position_embeddings=image_seq_len*context_n_frames+1,
-            attention_bias=False,
-            attention_dropout=0.0,
-            mlp_bias=False,
         ))
-        self.out_proj = nn.Linear(512, 3*(4**2))
+        self.out_proj = nn.Linear(hidden_size, 3*(4**2))
 
 
     def forward(self, frames):
@@ -200,17 +198,24 @@ class ActionVQVAE(nn.Module):
         frames = frames.permute(0, 1, 3, 4, 2).flatten(1, 3).contiguous()
 
         frames = self.in_proj(frames)
+        input_frames = frames
         frames = self.encoder(inputs_embeds=frames, use_cache=False).last_hidden_state
 
         last_tokens = frames[:, -1:, :]
         last_tokens = self.bottleneck(last_tokens)
-        assert last_tokens.shape == (frames.shape[0], 1, 64)
+        assert last_tokens.shape == (frames.shape[0], 1, self.latent_dim)
 
         vq_loss, z_q, perplexity, min_encodings, min_encoding_indices = self.quantizer(last_tokens)
 
         z_q = self.un_bottleneck(z_q)
 
-        frames = torch.concat([frames, z_q, torch.ones(frames.shape[0], image_seq_len, frames.shape[-1], dtype=frames.dtype, device=frames.device)], dim=1)
+        frames = torch.concat([
+            input_frames, 
+            z_q, 
+            torch.ones(
+                input_frames.shape[0], image_seq_len, input_frames.shape[-1], 
+                dtype=input_frames.dtype, device=input_frames.device)
+        ], dim=1)
 
         pred_frames = self.decoder(inputs_embeds=frames, use_cache=False).last_hidden_state
         pred_frames = pred_frames[:, -image_seq_len:, :]
@@ -218,6 +223,8 @@ class ActionVQVAE(nn.Module):
         pred_frames = pred_frames.reshape(pred_frames.shape[0], int(image_seq_len**0.5), int(image_seq_len**0.5), -1)
         pred_frames = pred_frames.permute(0, 3, 1, 2)
         pred_frames = F.pixel_shuffle(pred_frames, 4)
+
+        pred_frames = pred_frames.sigmoid() - 1
 
         mse_loss = F.mse_loss(pred_frames, target_frames)
 
