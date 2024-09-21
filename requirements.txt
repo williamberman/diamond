@@ -12,3 +12,4 @@ ipdb
 pandas
 scikit-learn
 git+https://github.com/google-research/rliable
+transformers
