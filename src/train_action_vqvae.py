@@ -48,7 +48,7 @@ def main():
             "grad_norm": grad_norm.item(),
         }
 
-        print(log_args)
+        print(f"{step}: {log_args}")
 
         if (step+1) % 200 == 0:
             validation(model)
