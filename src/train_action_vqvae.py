@@ -52,16 +52,18 @@ def main():
 
         print(f"{step}: {log_args}")
 
-        if (step+1) % 500 == 0:
-            validation(model)
-
+        if (step+1) % 1000 == 0:
+            validation(model, use_hold_out=True)
+            print('*****************')
+            validation(model, use_hold_out=False)
+            print('*****************')
         step += 1
 
 @torch.no_grad()
-def validation(model):
+def validation(model, use_hold_out):
     model.eval()
 
-    dataloader = DataLoader(TorchDataset(use_hold_out=True, infini_iter=False), batch_size=128, num_workers=0)
+    dataloader = DataLoader(TorchDataset(use_hold_out=use_hold_out, infini_iter=False), batch_size=128, num_workers=0)
     action_mapping_scores = defaultdict(int)
     out_of = 0
 
@@ -170,14 +172,13 @@ class ActionVQVAE(nn.Module):
             attention_bias=False,
             attention_dropout=0.0,
             mlp_bias=False,
+            
+            max_position_embeddings=image_seq_len*10_000, # bigger than anything we will see
         )
         self.latent_dim = 6
 
         self.in_proj = nn.Linear(3*(4**2), hidden_size)
-        self.encoder = LlamaModel(LlamaConfig(
-            **config,
-            max_position_embeddings=image_seq_len*(context_n_frames-1),
-        ))
+        self.encoder = LlamaModel(LlamaConfig(**config))
 
         # self.bottleneck = nn.Linear(hidden_size, self.latent_dim)
         # self.quantizer = VectorQuantizer(n_e=4, e_dim=self.latent_dim, beta=0.01)
@@ -202,24 +203,23 @@ class ActionVQVAE(nn.Module):
             ema_update=True,
         )
 
-        self.decoder = LlamaModel(LlamaConfig(
-            **config,
-            max_position_embeddings=image_seq_len*context_n_frames+1,
-        ))
+        self.decoder = LlamaModel(LlamaConfig(**config))
         self.out_proj = nn.Linear(hidden_size, 3*(4**2))
 
 
     def forward(self, frames):
         target_frames = frames[:, -1, :, :, :]
 
-        frames = frames[:, :-1, :, :, :] # do not pass in the last frame to the encoder
         frames = F.pixel_unshuffle(frames, 4)
 
         # batch, time, channels, height, width -> batch, seq, inner dim
         frames = frames.permute(0, 1, 3, 4, 2).flatten(1, 3).contiguous()
 
         frames = self.in_proj(frames)
-        input_frames = frames
+
+        pass_to_decoder = frames[:, :-image_seq_len, :]
+        assert pass_to_decoder.shape[1] == image_seq_len*3
+
         frames = self.encoder(inputs_embeds=frames, use_cache=False).last_hidden_state
 
         last_tokens = frames[:, -1:, :]
@@ -238,11 +238,11 @@ class ActionVQVAE(nn.Module):
         # z_q = self.un_bottleneck(z_q)
 
         frames = torch.concat([
-            input_frames, 
+            pass_to_decoder, 
             z_q, 
             torch.ones(
-                input_frames.shape[0], image_seq_len, input_frames.shape[-1], 
-                dtype=input_frames.dtype, device=input_frames.device)
+                pass_to_decoder.shape[0], image_seq_len, pass_to_decoder.shape[-1], 
+                dtype=pass_to_decoder.dtype, device=pass_to_decoder.device)
         ], dim=1)
 
         pred_frames = self.decoder(inputs_embeds=frames, use_cache=False).last_hidden_state
