@@ -10,6 +10,8 @@ import imageio
 from models.diffusion import Denoiser, DiffusionSampler, DiffusionSamplerConfig
 from models.rew_end_model import RewEndModel
 import tqdm
+from collections import defaultdict
+
 
 OmegaConf.register_new_resolver("eval", eval)
 
@@ -35,7 +37,7 @@ def main(cfg: DictConfig):
     num_steps_conditioning = sampler.denoiser.inner_model.cfg.num_steps_conditioning
     rew_end_model = agent.rew_end_model
 
-    state, _ = test_env.reset()
+    state, info = test_env.reset()
     obs = [state]
     actions = []
 
@@ -43,9 +45,14 @@ def main(cfg: DictConfig):
 
     while True:
         print(ctr)
-        action = choose_action(sampler, rew_end_model, obs, actions)
+
+        if ctr == 0 or info['lives'] != 1:
+            action = 1
+        else:
+            action = choose_action(sampler, rew_end_model, obs, actions)
+
         actions.append(action)
-        state, _, end, trunc, _ = test_env.step(torch.tensor([action]))
+        state, _, end, trunc, info = test_env.step(torch.tensor([action]))
         obs.append(state)
 
         if end or trunc:
@@ -53,12 +60,16 @@ def main(cfg: DictConfig):
 
         ctr += 1
 
+        if (ctr+1) % 10 == 0:
+            save(obs, ctr+1)
+
+    save(obs, ctr)
+
+def save(obs, idx):
     obs = torch.cat(obs, dim=0).permute(0, 2, 3, 1).mul(0.5).add(0.5).mul(255).clamp(0, 255).byte().cpu().numpy()
     obs = [Image.fromarray(x).resize((256, 256)) for x in obs]
-    imageio.mimsave("/workspace/obs.mp4", obs, fps=30)
+    imageio.mimsave(f"/workspace/obs_{idx}.mp4", obs, fps=5)
     print("saved")
-
-    # print(agent.world_model.encoder.forward(torch.randn(1, 4, 84, 84)))
 
 def choose_action(sampler, rew_end_model, obs, actions):
     assert len(obs) == len(actions) + 1
@@ -66,38 +77,38 @@ def choose_action(sampler, rew_end_model, obs, actions):
     if len(obs) < num_steps_conditioning:
         return random.randint(0, num_actions - 1)
 
-    all_rew = []
-    all_end = []
+    all_rew = defaultdict(list)
+    all_end = defaultdict(list)
 
     pbar = tqdm.tqdm(total=num_actions*5)
 
-    for act in range(num_actions):
-        all_rew.append([])
-        all_end.append([])
-
+    for act in [2, 3]:
         for _ in range(5):
             rew, end = sample_trajectory(sampler, rew_end_model, obs, actions + [act], 10)
-            all_rew[-1].append(rew)
-            all_end[-1].append(end)
+            all_rew[act].append(rew)
+            all_end[act].append(end)
             pbar.update(1)
 
-    avg_rews = [sum(rew)/len(rew) for rew in all_rew]
-    ends = [any(end) for end in all_end]
+    avg_rews = {act: sum(rew)/len(rew) for act, rew in all_rew.items()}
+    ends = {act: any(end) for act, end in all_end.items()}
 
     pbar.close()
 
     best_rew = -float("inf")
     best_action = None
 
-    for action, avg_rew, end in zip(range(num_actions), avg_rews, ends):
+    for action in avg_rews.keys():
+        avg_rew = avg_rews[action]
+        end = ends[action]
+
         if avg_rew > best_rew and not end:
             best_rew = avg_rew
             best_action = action
 
     if best_action is None:
-        best_action = random.randint(0, num_actions - 1)
+        best_action = random.choice(list(avg_rews.keys()))
 
-    print(f"search_results: {[x for x in zip(avg_rews, ends)]}, best_action: {best_action}, best_rew: {best_rew}")
+    print(f"avg_rews: {avg_rews}, ends: {ends}, best_action: {best_action}, best_rew: {best_rew}")
 
     return best_action
 
