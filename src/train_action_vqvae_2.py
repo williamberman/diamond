@@ -19,6 +19,7 @@ from vector_quantize_pytorch import VectorQuantize
 
 from models.blocks import UNet, Conv3x3, GroupNorm
 from torch import Tensor
+from PIL import Image
 
 from dataclasses import dataclass
 
@@ -78,8 +79,31 @@ def validation(model, use_hold_out):
         pred_frames, mse_loss, vq_loss, min_encoding_indices = model(frames)
         loss = mse_loss + vq_loss
 
+        # foo = [Image.fromarray(x).resize((256,256)) for x in pred_frames.mul(0.5).add(0.5).mul(255).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()]
+        # os.makedirs("pred", exist_ok=True)
+        # for i, x in enumerate(foo):
+        #     x.save(f"pred/{i}.png")
+
+        # bar = [Image.fromarray(x).resize((256,256)) for x in frames[:, -1].mul(0.5).add(0.5).mul(255).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()]
+        # os.makedirs("inp", exist_ok=True)
+        # for i, x in enumerate(bar):
+        #     x.save(f"inp/{i}.png")
+
         target_actions = batch["actions"].to(device)[:, :-1]
         out_of += target_actions.numel()
+
+        # actions_to_str = {
+        #     0: "NOOP",
+        #     1: "FIRE",
+        #     2: "RIGHT",
+        #     3: "LEFT",
+        # }
+        # for i, (ba, pba) in enumerate(zip(target_actions, min_encoding_indices)):
+        #     print(f"{i}: {actions_to_str[ba[-1].item()]} -> {pba[-1].item()}")
+        #     if i > 20:
+        #         break
+
+        # import ipdb; ipdb.set_trace()
 
         for action_mapping_ctr, action_mapping in enumerate(permutations(range(4))):
             target_actions_ = []
@@ -113,7 +137,7 @@ class TorchDataset(torch.utils.data.IterableDataset):
         self.use_hold_out = use_hold_out
         self.infini_iter = infini_iter
 
-        self.ds = Dataset("/mnt/raid/diamond/action_autoencoder/dataset/Breakout_recordings_100k_labeled_100/")
+        self.ds = Dataset("/mnt/raid/diamond/action_autoencoder/dataset/Breakout_recordings_100k_correct/")
         self.ds.load_from_default_path()
 
         hold_out = 10_000
