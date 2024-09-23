@@ -207,6 +207,13 @@ class Trainer(StateDictMixin):
     def run(self) -> None:
         to_log = []
 
+        if hasattr(self._cfg, "only_run_validation") and self._cfg.only_run_validation:
+            to_log += self.collect_test()
+            if not self._is_model_free:
+                to_log += self.test_agent()
+            wandb_log(to_log, 0)
+            return
+
         if self.epoch == 0:
             if self._is_model_free or self._is_static_dataset:
                 self.num_epochs_collect = 0

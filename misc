@@ -159,3 +159,20 @@ python src/main.py \
     actor_critic.training.steps_first_epoch=400 \
     evaluation.every=3
 ```
+
+# run validation against their checkpoint
+```bash
+wget 'https://huggingface.co/eloialonso/diamond/resolve/main/atari_100k/Breakout.pt'
+
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    wandb.mode=disabled \
+    common.device=cuda:2 \
+    denoiser.train=False \
+    rew_end_model.train=False \
+    actor_critic.train=False \
+    initialization.path_to_ckpt=/workspace/Breakout.pt \
+    evaluation.every=3 \
+    collection.test.num_episodes=100 \
+    only_run_validation=True
+```
