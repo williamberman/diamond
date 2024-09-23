@@ -32,10 +32,10 @@ context_n_frames = 5
 def main():
     global step
 
-    dataloader = iter(DataLoader(TorchDataset(), batch_size=32, num_workers=8))
+    dataloader = iter(DataLoader(TorchDataset(), batch_size=256, num_workers=8))
 
     model = ActionVQVAE().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
 
     step = 0
 
@@ -68,9 +68,12 @@ def main():
         if (step+1) % 300 == 0:
             print(model.quantizer._codebook.embed)
 
-        if (step+1) % 500 == 0:
-            torch.save(model.state_dict(), f"model_{step+1}.pt")
-            validation(model, use_hold_out=True)
+        if (step+1) % 1000 == 0:
+            # torch.save(model.state_dict(), f"model_{step+1}.pt")
+            mapping = validation(model, use_hold_out=False, dbg=False, n_batches=10)
+            validation(model, use_hold_out=False, dbg=True, mapping=mapping)
+            # mapping = validation(model, use_hold_out=False)
+            # mapping = validation(model, use_hold_out=False, mapping=mapping, dbg=True)
             print('*****************')
             # validation(model, use_hold_out=False)
             print('*****************')
@@ -96,8 +99,8 @@ def validation(model, use_hold_out, mapping=None, dbg=False, n_batches=None):
         loss = mse_loss + vq_loss
 
         target_actions = batch["actions"].to(device)[:, :-1]
-        out_of += target_actions.numel()
-        # out_of += target_actions.shape[0]
+        # out_of += target_actions.numel()
+        out_of += target_actions.shape[0]
 
         if dbg:
             # foo = [Image.fromarray(x).resize((256,256)) for x in pred_frames.mul(0.5).add(0.5).mul(255).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()]
@@ -137,8 +140,8 @@ def validation(model, use_hold_out, mapping=None, dbg=False, n_batches=None):
 
             target_actions_ = torch.tensor(target_actions_, device=device, dtype=torch.long)
 
-            score = (target_actions_ == min_encoding_indices).sum().item()
-            # score = (target_actions_[:, -1] == min_encoding_indices[:, -1]).sum().item()
+            # score = (target_actions_ == min_encoding_indices).sum().item()
+            score = (target_actions_[:, -1] == min_encoding_indices[:, -1]).sum().item()
             action_mapping_scores[action_mapping_ctr] += score
 
         if ctr >= n_batches:
@@ -254,22 +257,23 @@ class ActionVQVAE(nn.Module):
         self.encoder = Convyconv()
 
         self.quantizer = VectorQuantize(
-            dim=16,
+            dim=2,
             codebook_size=4,
-            codebook_dim=16,
+            codebook_dim=2,
             heads=1,
             separate_codebook_per_head=False,
             decay=0.99,
             eps=1e-5, # XXX
-            use_cosine_sim=False,
-            layernorm_after_project_in=True,
-            # threshold_ema_dead_code=2,
+            use_cosine_sim=True,
+            layernorm_after_project_in=False,
+            threshold_ema_dead_code=1,
             channel_last=True, # XXX
             accept_image_fmap=False, # XXX
             commitment_weight=1.0,
             stochastic_sample_codes=False,
             ema_update=True,
             # orthogonal_reg_weight=1.0,
+            orthogonal_reg_weight=0.2,
         )
 
         self.decoder = InnerModel(
@@ -307,7 +311,8 @@ class InnerModel(nn.Module):
     def __init__(self, cfg: InnerModelConfig) -> None:
         super().__init__()
         self.cond_proj = nn.Sequential(
-            nn.Linear(cfg.num_steps_conditioning * 16, cfg.cond_channels),
+            # nn.Linear(cfg.num_steps_conditioning * 2, cfg.cond_channels),
+            nn.Linear(2, cfg.cond_channels),
             nn.SiLU(),
             nn.Linear(cfg.cond_channels, cfg.cond_channels),
         )
@@ -418,8 +423,47 @@ class Convyconv(nn.Module):
 
         dim = 16*context_n_frames*3 + 16*3 + 16*(context_n_frames-1)*3 + 16*3
 
-        self.norm = nn.BatchNorm1d(dim, affine=False)
-        self.out = nn.Linear(dim, (context_n_frames-1)*16)
+
+        self.proj1 = nn.Sequential(
+            nn.BatchNorm1d(dim, affine=False),
+            nn.ReLU(),
+            nn.Linear(dim, dim//2)
+        )
+
+        self.proj2 = nn.Sequential(
+            nn.BatchNorm1d(dim//2, affine=False),
+            nn.ReLU(),
+            nn.Linear(dim//2, dim//4)
+        )
+
+        self.proj3 = nn.Sequential(
+            nn.BatchNorm1d(dim//4, affine=False),
+            nn.ReLU(),
+            nn.Linear(dim//4, dim//8)
+        )
+
+        self.proj4 = nn.Sequential(
+            nn.BatchNorm1d(dim//8, affine=False),
+            nn.ReLU(),
+            nn.Linear(dim//8, dim//16)
+        )
+
+        self.proj5 = nn.Sequential(
+            nn.BatchNorm1d(dim//16, affine=False),
+            nn.ReLU(),
+            nn.Linear(dim//16, (context_n_frames-1)*2)
+        )
+
+        self.proj6 = nn.Sequential(
+            nn.BatchNorm1d((context_n_frames-1)*2, affine=False),
+            nn.ReLU(),
+            nn.Linear((context_n_frames-1)*2, 2)
+        )
+
+        self.out = nn.Sequential(
+            nn.BatchNorm1d(2, affine=False),
+            # nn.ReLU(),
+        )
     
     def forward(self, frames):
         bs, n_frames, c, h, w = frames.shape
@@ -451,24 +495,35 @@ class Convyconv(nn.Module):
         diff_multi_conv5x5 = F.adaptive_max_pool2d(self.multi_diff_conv5x5(diff_imgs_multi), 1).reshape(bs, -1)
         diff_multi_conv7x7 = F.adaptive_max_pool2d(self.multi_diff_conv7x7(diff_imgs_multi), 1).reshape(bs, -1)
 
-        x = torch.cat([
+        filters = torch.cat([
             single_conv3x3, single_conv5x5, single_conv7x7,
             multi_conv3x3, multi_conv5x5, multi_conv7x7,
             diff_conv3x3, diff_conv5x5, diff_conv7x7,
             diff_multi_conv3x3, diff_multi_conv5x5, diff_multi_conv7x7,
         ], dim=-1)
 
-        x = self.norm(x)
-        x = F.relu(x)
+        filters1 = self.proj1(filters)
+        filters2 = self.proj2(filters1)
+        filters3 = self.proj3(filters2)
+        filters4 = self.proj4(filters3)
+        filters5 = self.proj5(filters4)
+        filters6 = self.proj6(filters5)
 
-        x = self.out(x)
+        filters7 = self.out(filters6)
+        out = filters7.reshape(bs, -1, 2)
 
         if (step+1) % 100 == 0:
-            dbg_dot_prod(x)
+            print("***************")
+            dbg_dot_prod(out[:, 0, :])
+            print("***************")
+            # dbg_dot_prod(out[:, 1, :])
+            # print("***************")
+            # dbg_dot_prod(out[:, 2, :])
+            # print("***************")
+            # dbg_dot_prod(out[:, 3, :])
+            # print("***************")
 
-        x = x.reshape(bs, -1, 16)
-
-        return x
+        return out
 
 def dbg_dot_prod(foo):
     dot_prods = []
