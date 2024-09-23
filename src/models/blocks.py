@@ -127,9 +127,10 @@ class SmallResBlock(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, cond_channels: Optional[int], attn: bool) -> None:
+    def __init__(self, in_channels: int, out_channels: int, cond_channels: Optional[int], attn: bool, dropout=0.0) -> None:
         super().__init__()
         should_proj = in_channels != out_channels
+        self.dropout = nn.Dropout(dropout)
         self.proj = Conv1x1(in_channels, out_channels) if should_proj else nn.Identity()
         if cond_channels is not None:
             self.norm1 = AdaGroupNorm(in_channels, cond_channels)
@@ -145,6 +146,7 @@ class ResBlock(nn.Module):
         nn.init.zeros_(self.conv2.weight)
 
     def forward(self, x: Tensor, cond: Optional[Tensor] = None) -> Tensor:
+        x = self.dropout(x)
         r = self.proj(x)
         if cond is not None:
             x = self.conv1(F.silu(self.norm1(x, cond)))
@@ -167,13 +169,14 @@ class ResBlocks(nn.Module):
         list_out_channels: List[int],
         cond_channels: int,
         attn: bool,
+        dropout: float = 0.0
     ) -> None:
         super().__init__()
         assert len(list_in_channels) == len(list_out_channels)
         self.in_channels = list_in_channels[0]
         self.resblocks = nn.ModuleList(
             [
-                ResBlock(in_ch, out_ch, cond_channels, attn)
+                ResBlock(in_ch, out_ch, cond_channels, attn, dropout)
                 for (in_ch, out_ch) in zip(list_in_channels, list_out_channels)
             ]
         )

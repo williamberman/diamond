@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from itertools import permutations
 from collections import defaultdict
 import tqdm
-from vector_quantize_pytorch import VectorQuantize
+from vector_quantize_pytorch import VectorQuantize, l2norm
 
 from models.blocks import UNet, Conv3x3, GroupNorm
 from torch import Tensor
@@ -30,10 +30,12 @@ device = int(os.environ["LOCAL_RANK"])
 context_n_frames = 5
 
 def main():
-    dataloader = iter(DataLoader(TorchDataset(), batch_size=32, num_workers=0))
+    global step
+
+    dataloader = iter(DataLoader(TorchDataset(), batch_size=32, num_workers=8))
 
     model = ActionVQVAE().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
     step = 0
 
@@ -47,15 +49,24 @@ def main():
         optimizer.step()
         optimizer.zero_grad()
 
+        dot_prods = []
+        for i in range(4):
+            a = F.normalize(model.quantizer._codebook.embed[0, 0], dim=-1)
+            b = F.normalize(model.quantizer._codebook.embed[0, i], dim=-1)
+            dot_prods.append((a @ b).item())
+
         log_args = {
             "loss": loss.item(),
             "mse_loss": mse_loss.item(),
             "vq_loss": vq_loss.item(),
             "grad_norm": grad_norm.item(),
             "indices_used": min_encoding_indices.unique().tolist(),
+            "dot_prods": dot_prods,
         }
-
         print(f"{step}: {log_args}")
+
+        if (step+1) % 300 == 0:
+            print(model.quantizer._codebook.embed)
 
         if (step+1) % 500 == 0:
             torch.save(model.state_dict(), f"model_{step+1}.pt")
@@ -182,15 +193,25 @@ class TorchDataset(torch.utils.data.IterableDataset):
     @torch.no_grad()
     def __iter__(self):
         if self.infini_iter:
-            while True:
-                episode_id = random.choice(self.non_hold_out_episodes)
-                episode = self.ds.load_episode(episode_id)
 
-                for _ in range(len(episode)-context_n_frames):
-                    frame_idx = random.randint(0, len(episode)-context_n_frames-1)
-                    frames = episode.obs[frame_idx:frame_idx+context_n_frames]
-                    actions = episode.act[frame_idx:frame_idx+context_n_frames]
-                    yield dict(frames=frames, actions=actions)
+            while True:
+                buffer = []
+
+                for _ in range(10):
+                    episode_id = random.choice(self.non_hold_out_episodes)
+                    episode = self.ds.load_episode(episode_id)
+
+                    for _ in range(len(episode)-context_n_frames):
+                        frame_idx = random.randint(0, len(episode)-context_n_frames-1)
+                        frames = episode.obs[frame_idx:frame_idx+context_n_frames]
+                        actions = episode.act[frame_idx:frame_idx+context_n_frames]
+                        buffer.append(dict(frames=frames, actions=actions))
+
+                random.shuffle(buffer)
+
+                for x in buffer:
+                    yield x
+
         else:
             for episode_id in self.non_hold_out_episodes:
                 episode = self.ds.load_episode(episode_id)
@@ -262,7 +283,7 @@ class InnerModelConfig:
     attn_depths: List[bool]
     num_actions: Optional[int] = None
     use_act_emb: bool = False
-
+    dropout: float = 0.0
 
 class InnerModel(nn.Module):
     def __init__(self, cfg: InnerModelConfig) -> None:
@@ -291,7 +312,7 @@ class InnerModelEncoder(nn.Module):
     def __init__(self, cfg: InnerModelConfig) -> None:
         super().__init__()
         self.conv_in = Conv3x3((cfg.num_steps_conditioning) * cfg.img_channels, cfg.channels[0])
-        self.unet = UNetFirstHalf(cfg.depths, cfg.channels, cfg.attn_depths)
+        self.unet = UNetFirstHalf(cfg.depths, cfg.channels, cfg.attn_depths, cfg.dropout)
 
     def forward(self, obs: Tensor) -> Tensor:
         x = self.conv_in(obs)
@@ -301,7 +322,7 @@ class InnerModelEncoder(nn.Module):
 from models.blocks import ResBlocks, Downsample, Upsample
 
 class UNetFirstHalf(nn.Module):
-    def __init__(self, depths: List[int], channels: List[int], attn_depths: List[int]) -> None:
+    def __init__(self, depths: List[int], channels: List[int], attn_depths: List[int], dropout=0.0) -> None:
         super().__init__()
         assert len(depths) == len(channels) == len(attn_depths)
 
@@ -315,6 +336,7 @@ class UNetFirstHalf(nn.Module):
                     list_out_channels=[c2] * n,
                     cond_channels=None,
                     attn=attn_depths[i],
+                    dropout=dropout,
                 )
             )
         self.d_blocks = nn.ModuleList(d_blocks)
@@ -324,6 +346,7 @@ class UNetFirstHalf(nn.Module):
             list_out_channels=[channels[-1]] * 2,
             cond_channels=None,
             attn=True,
+            dropout=dropout,
         )
 
         downsamples = [nn.Identity()] + [Downsample(c) for c in channels[:-1]]
