@@ -350,15 +350,6 @@ class InnerModelEncoder(nn.Module):
 
         encoded_frames = encoded_frames.reshape(encoded_frames.shape[0], context_n_frames-1, 16)
 
-        # foo = encoded_frames[:, 1, :]
-        # dot_prods = []
-        # for b_idx in range(foo.shape[0]):
-        #     a = F.normalize(foo[b_idx], dim=-1)
-        #     b = F.normalize(foo[0], dim=-1)
-        #     dot_prods.append((a @ b).item())
-        # print(f"dot_prods: {dot_prods}")
-        # print(sum(dot_prods)/len(dot_prods))
-
         return encoded_frames
 
 from models.blocks import ResBlocks, Downsample, Upsample
