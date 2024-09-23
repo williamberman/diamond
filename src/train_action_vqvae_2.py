@@ -57,6 +57,7 @@ def main():
         print(f"{step}: {log_args}")
 
         if (step+1) % 500 == 0:
+            torch.save(model.state_dict(), f"model_{step+1}.pt")
             validation(model, use_hold_out=True)
             print('*****************')
             # validation(model, use_hold_out=False)
