@@ -231,16 +231,22 @@ class TorchDataset(torch.utils.data.IterableDataset):
 class ActionVQVAE(nn.Module):
     def __init__(self):
         super().__init__()
-        self.encoder= InnerModelEncoder(
-            InnerModelConfig(
-                img_channels=3,
-                num_steps_conditioning=context_n_frames,
-                cond_channels=None,
-                depths=[2,2,2,2,2,2,2],
-                channels=[64,64,64,64,64,64,64],
-                attn_depths=[0,0,0,0,0,0,0]
-            )
-        )
+        # self.encoder= InnerModelEncoder(
+        #     InnerModelConfig(
+        #         img_channels=3,
+        #         num_steps_conditioning=context_n_frames,
+        #         cond_channels=None,
+        #         # depths=[2,2,2,2,2,2,2],
+        #         # channels=[64,64,64,64,64,64,64],
+        #         # attn_depths=[0,0,0,0,0,0,0],
+        #         depths=[2,2,2,2],
+        #         channels=[64,64,64,64],
+        #         attn_depths=[0,0,0,0],
+        #         # dropout=0.75
+        #         dropout=0.0
+        #     )
+        # )
+        self.encoder = Convyconv()
 
         self.quantizer = VectorQuantize(
             dim=16,
@@ -250,14 +256,15 @@ class ActionVQVAE(nn.Module):
             separate_codebook_per_head=False,
             decay=0.99,
             eps=1e-5, # XXX
-            use_cosine_sim=True,
+            use_cosine_sim=False,
             layernorm_after_project_in=True,
-            threshold_ema_dead_code=2,
+            # threshold_ema_dead_code=2,
             channel_last=True, # XXX
             accept_image_fmap=False, # XXX
             commitment_weight=1.0,
-            stochastic_sample_codes=True,
+            stochastic_sample_codes=False,
             ema_update=True,
+            # orthogonal_reg_weight=1.0,
         )
 
         self.decoder = InnerModel(
@@ -272,8 +279,7 @@ class ActionVQVAE(nn.Module):
         )
 
     def forward(self, frames):
-        encoded_frames = self.encoder(frames.flatten(1, 2))
-        encoded_frames = encoded_frames.reshape(encoded_frames.shape[0], context_n_frames-1, 16)
+        encoded_frames = self.encoder(frames)
         z_q, min_encoding_indices, vq_loss = self.quantizer(encoded_frames)
         z_q_cond = z_q.reshape(z_q.shape[0], -1)
         pred_frames = self.decoder(frames[:, :-1, :, :, :].flatten(1, 2), z_q_cond)
@@ -321,10 +327,34 @@ class InnerModelEncoder(nn.Module):
         self.conv_in = Conv3x3((cfg.num_steps_conditioning) * cfg.img_channels, cfg.channels[0])
         self.unet = UNetFirstHalf(cfg.depths, cfg.channels, cfg.attn_depths, cfg.dropout)
 
-    def forward(self, obs: Tensor) -> Tensor:
+    def forward(self, frames: Tensor) -> Tensor:
+        diff1 = frames[:, 1] - frames[:, 0]
+        diff2 = frames[:, 2] - frames[:, 1]
+        diff3 = frames[:, 3] - frames[:, 2]
+        diff4 = frames[:, 4] - frames[:, 3]
+
+        encoder_input = torch.stack([torch.zeros_like(diff1), diff1, diff2, diff3, diff4], dim=1)
+        encoder_input = encoder_input.flatten(1, 2)
+
+        obs = encoder_input
+
         x = self.conv_in(obs)
         x = self.unet(x)
-        return x
+
+        encoded_frames = x
+
+        encoded_frames = encoded_frames.reshape(encoded_frames.shape[0], context_n_frames-1, 16)
+
+        # foo = encoded_frames[:, 1, :]
+        # dot_prods = []
+        # for b_idx in range(foo.shape[0]):
+        #     a = F.normalize(foo[b_idx], dim=-1)
+        #     b = F.normalize(foo[0], dim=-1)
+        #     dot_prods.append((a @ b).item())
+        # print(f"dot_prods: {dot_prods}")
+        # print(sum(dot_prods)/len(dot_prods))
+
+        return encoded_frames
 
 from models.blocks import ResBlocks, Downsample, Upsample
 
@@ -369,6 +399,89 @@ class UNetFirstHalf(nn.Module):
         x, _ = self.mid_blocks(x, None)
 
         return x
+
+class Convyconv(nn.Module):
+    def __init__(self):
+        super(Convyconv, self).__init__()
+        
+        self.single_conv3x3 = nn.Conv2d(3, 16, kernel_size=3, padding=1, bias=False)
+        self.single_conv5x5 = nn.Conv2d(3, 16, kernel_size=5, padding=2, bias=False)
+        self.single_conv7x7 = nn.Conv2d(3, 16, kernel_size=7, padding=3, bias=False)
+
+        self.multi_conv3x3 = nn.Conv2d(3*context_n_frames, 16, kernel_size=3, padding=1, bias=False)
+        self.multi_conv5x5 = nn.Conv2d(3*context_n_frames, 16, kernel_size=5, padding=2, bias=False)
+        self.multi_conv7x7 = nn.Conv2d(3*context_n_frames, 16, kernel_size=7, padding=3, bias=False)
+
+        self.diff_conv3x3 = nn.Conv2d(3, 16, kernel_size=3, padding=1, bias=False)
+        self.diff_conv5x5 = nn.Conv2d(3, 16, kernel_size=5, padding=2, bias=False)
+        self.diff_conv7x7 = nn.Conv2d(3, 16, kernel_size=7, padding=3, bias=False)
+
+        self.multi_diff_conv3x3 = nn.Conv2d(3*(context_n_frames-1), 16, kernel_size=3, padding=1, bias=False)
+        self.multi_diff_conv5x5 = nn.Conv2d(3*(context_n_frames-1), 16, kernel_size=5, padding=2, bias=False)
+        self.multi_diff_conv7x7 = nn.Conv2d(3*(context_n_frames-1), 16, kernel_size=7, padding=3, bias=False)
+
+        dim = 16*context_n_frames*3 + 16*3 + 16*(context_n_frames-1)*3 + 16*3
+
+        self.norm = nn.BatchNorm1d(dim, affine=False)
+        self.out = nn.Linear(dim, (context_n_frames-1)*16)
+    
+    def forward(self, frames):
+        bs, n_frames, c, h, w = frames.shape
+
+        frames = torch.where(frames == -1, torch.zeros_like(frames), frames)
+
+        single_imgs = frames.reshape(-1, c, h, w)
+
+        single_conv3x3 = F.adaptive_max_pool2d(self.single_conv3x3(single_imgs), 1).reshape(bs, -1)
+        single_conv5x5 = F.adaptive_max_pool2d(self.single_conv5x5(single_imgs), 1).reshape(bs, -1)
+        single_conv7x7 = F.adaptive_max_pool2d(self.single_conv7x7(single_imgs), 1).reshape(bs, -1)
+
+        multi_imgs = frames.reshape(bs, -1, h, w)
+
+        multi_conv3x3 = F.adaptive_max_pool2d(self.multi_conv3x3(multi_imgs), 1).reshape(bs, -1)
+        multi_conv5x5 = F.adaptive_max_pool2d(self.multi_conv5x5(multi_imgs), 1).reshape(bs, -1)
+        multi_conv7x7 = F.adaptive_max_pool2d(self.multi_conv7x7(multi_imgs), 1).reshape(bs, -1)
+
+
+        diff_imgs = frames[:, 1:] - frames[:, :-1]
+
+        diff_imgs_single = diff_imgs.reshape(-1, c, h, w)
+        diff_conv3x3 = F.adaptive_max_pool2d(self.diff_conv3x3(diff_imgs_single), 1).reshape(bs, -1)
+        diff_conv5x5 = F.adaptive_max_pool2d(self.diff_conv5x5(diff_imgs_single), 1).reshape(bs, -1)
+        diff_conv7x7 = F.adaptive_max_pool2d(self.diff_conv7x7(diff_imgs_single), 1).reshape(bs, -1)
+
+        diff_imgs_multi = diff_imgs.reshape(bs, -1, h, w)
+        diff_multi_conv3x3 = F.adaptive_max_pool2d(self.multi_diff_conv3x3(diff_imgs_multi), 1).reshape(bs, -1)
+        diff_multi_conv5x5 = F.adaptive_max_pool2d(self.multi_diff_conv5x5(diff_imgs_multi), 1).reshape(bs, -1)
+        diff_multi_conv7x7 = F.adaptive_max_pool2d(self.multi_diff_conv7x7(diff_imgs_multi), 1).reshape(bs, -1)
+
+        x = torch.cat([
+            single_conv3x3, single_conv5x5, single_conv7x7,
+            multi_conv3x3, multi_conv5x5, multi_conv7x7,
+            diff_conv3x3, diff_conv5x5, diff_conv7x7,
+            diff_multi_conv3x3, diff_multi_conv5x5, diff_multi_conv7x7,
+        ], dim=-1)
+
+        x = self.norm(x)
+        x = F.relu(x)
+
+        x = self.out(x)
+
+        if (step+1) % 100 == 0:
+            dbg_dot_prod(x)
+
+        x = x.reshape(bs, -1, 16)
+
+        return x
+
+def dbg_dot_prod(foo):
+    dot_prods = []
+    for b_idx in range(foo.shape[0]):
+        a = F.normalize(foo[b_idx], dim=-1)
+        b = F.normalize(foo[0], dim=-1)
+        dot_prods.append((a @ b).item())
+    print(f"dot_prods: {dot_prods}")
+    print(sum(dot_prods)/len(dot_prods))
 
 if __name__ == "__main__":
     main()
