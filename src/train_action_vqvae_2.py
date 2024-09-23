@@ -78,30 +78,32 @@ def main():
         step += 1
 
 @torch.no_grad()
-def validation(model, use_hold_out, mapping=None, dbg=False):
+def validation(model, use_hold_out, mapping=None, dbg=False, n_batches=None):
     model.eval()
 
     dataloader = DataLoader(TorchDataset(use_hold_out=use_hold_out, infini_iter=False), batch_size=128, num_workers=0)
     action_mapping_scores = defaultdict(int)
     out_of = 0
 
-    for batch in tqdm.tqdm(dataloader, total=len(dataloader)):
+    for ctr, batch in enumerate(tqdm.tqdm(dataloader, total=min(n_batches, len(dataloader)))):
         frames = batch["frames"].to(device)
         pred_frames, mse_loss, vq_loss, min_encoding_indices = model(frames)
         loss = mse_loss + vq_loss
 
         target_actions = batch["actions"].to(device)[:, :-1]
+        out_of += target_actions.numel()
+        # out_of += target_actions.shape[0]
 
         if dbg:
-            foo = [Image.fromarray(x).resize((256,256)) for x in pred_frames.mul(0.5).add(0.5).mul(255).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()]
-            os.makedirs("pred", exist_ok=True)
-            for i, x in enumerate(foo):
-                x.save(f"pred/{i}.png")
+            # foo = [Image.fromarray(x).resize((256,256)) for x in pred_frames.mul(0.5).add(0.5).mul(255).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()]
+            # os.makedirs("pred", exist_ok=True)
+            # for i, x in enumerate(foo):
+            #     x.save(f"pred/{i}.png")
 
-            bar = [Image.fromarray(x).resize((256,256)) for x in frames[:, -1].mul(0.5).add(0.5).mul(255).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()]
-            os.makedirs("inp", exist_ok=True)
-            for i, x in enumerate(bar):
-                x.save(f"inp/{i}.png")
+            # bar = [Image.fromarray(x).resize((256,256)) for x in frames[:, -1].mul(0.5).add(0.5).mul(255).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()]
+            # os.makedirs("inp", exist_ok=True)
+            # for i, x in enumerate(bar):
+            #     x.save(f"inp/{i}.png")
 
             actions_to_str = {
                 0: "NOOP",
@@ -117,7 +119,8 @@ def validation(model, use_hold_out, mapping=None, dbg=False):
                 if i > 40:
                     break
 
-        # import ipdb; ipdb.set_trace()
+            model.train()
+            return
 
         for action_mapping_ctr, action_mapping in enumerate(permutations(range(4))):
             target_actions_ = []
@@ -130,7 +133,11 @@ def validation(model, use_hold_out, mapping=None, dbg=False):
             target_actions_ = torch.tensor(target_actions_, device=device, dtype=torch.long)
 
             score = (target_actions_ == min_encoding_indices).sum().item()
+            # score = (target_actions_[:, -1] == min_encoding_indices[:, -1]).sum().item()
             action_mapping_scores[action_mapping_ctr] += score
+
+        if ctr >= n_batches:
+            break
 
     max_mapping_ctr = None
     max_mapping_score = 0
