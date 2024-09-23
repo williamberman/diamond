@@ -127,21 +127,31 @@ class SmallResBlock(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, cond_channels: int, attn: bool) -> None:
+    def __init__(self, in_channels: int, out_channels: int, cond_channels: Optional[int], attn: bool) -> None:
         super().__init__()
         should_proj = in_channels != out_channels
         self.proj = Conv1x1(in_channels, out_channels) if should_proj else nn.Identity()
-        self.norm1 = AdaGroupNorm(in_channels, cond_channels)
+        if cond_channels is not None:
+            self.norm1 = AdaGroupNorm(in_channels, cond_channels)
+        else:
+            self.norm1 = GroupNorm(in_channels)
         self.conv1 = Conv3x3(in_channels, out_channels)
-        self.norm2 = AdaGroupNorm(out_channels, cond_channels)
+        if cond_channels is not None:
+            self.norm2 = AdaGroupNorm(out_channels, cond_channels)
+        else:
+            self.norm2 = GroupNorm(out_channels)
         self.conv2 = Conv3x3(out_channels, out_channels)
         self.attn = SelfAttention2d(out_channels) if attn else nn.Identity()
         nn.init.zeros_(self.conv2.weight)
 
-    def forward(self, x: Tensor, cond: Tensor) -> Tensor:
+    def forward(self, x: Tensor, cond: Optional[Tensor] = None) -> Tensor:
         r = self.proj(x)
-        x = self.conv1(F.silu(self.norm1(x, cond)))
-        x = self.conv2(F.silu(self.norm2(x, cond)))
+        if cond is not None:
+            x = self.conv1(F.silu(self.norm1(x, cond)))
+            x = self.conv2(F.silu(self.norm2(x, cond)))
+        else:
+            x = self.conv1(F.silu(self.norm1(x)))
+            x = self.conv2(F.silu(self.norm2(x)))
         x = x + r
         x = self.attn(x)
         return x
