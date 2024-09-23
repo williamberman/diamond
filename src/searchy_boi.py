@@ -76,6 +76,24 @@ def save(obs, idx):
     imageio.mimsave(f"/workspace/obs_{idx}.mp4", obs, fps=5)
     print("saved")
 
+def init_search_actions(n):
+    # acts = [[0], [2], [3]]
+    acts = [[2], [3]]
+
+    if n == 1:
+        return acts
+
+    n_1 = init_search_actions(n-1)
+
+    rv = []
+
+    for act in acts:
+        for n_1_act in n_1:
+            rv.append(act + n_1_act)
+
+    return rv
+
+
 def choose_action(sampler, rew_end_model, obs, actions):
     assert len(obs) == len(actions) + 1
 
@@ -85,13 +103,17 @@ def choose_action(sampler, rew_end_model, obs, actions):
     all_rew = defaultdict(list)
     all_end = defaultdict(list)
 
-    pbar = tqdm.tqdm(total=num_actions*5)
+    init_search_actions_ = init_search_actions(5)
+    n_samples = 1
 
-    for act in [2, 3]:
-        for _ in range(5):
-            rew, end = sample_trajectory(sampler, rew_end_model, obs, actions + [act], 10)
-            all_rew[act].append(rew)
-            all_end[act].append(end)
+    pbar = tqdm.tqdm(total=len(init_search_actions_)*n_samples)
+
+    for init_act in init_search_actions_:
+        obs_, actions_ = rollout_trajectory(sampler, rew_end_model, obs, actions, init_act)
+        for _ in range(n_samples):
+            rew, end = sample_trajectory(sampler, rew_end_model, obs_, actions_, 40)
+            all_rew[tuple(init_act)].append(rew)
+            all_end[tuple(init_act)].append(end)
             pbar.update(1)
 
     avg_rews = {act: sum(rew)/len(rew) for act, rew in all_rew.items()}
@@ -115,24 +137,35 @@ def choose_action(sampler, rew_end_model, obs, actions):
 
     print(f"avg_rews: {avg_rews}, ends: {ends}, best_action: {best_action}, best_rew: {best_rew}")
 
-    return best_action
+    return best_action[0]
+
+def rollout_trajectory(sampler, rew_end_model, obs, actions, rollout):
+    obs = [x for x in obs]
+    actions = [x for x in actions]
+
+    assert len(obs) == len(actions) + 1
+
+    for action in rollout:
+        actions.append(action)
+        obs_ = torch.cat(obs[-num_steps_conditioning:], dim=0).unsqueeze(0)
+        act_ = torch.tensor(actions[-num_steps_conditioning:], device=device, dtype=torch.long).unsqueeze(0)
+
+        next_obs = sampler.sample_next_obs(obs_, act_)[0]
+        obs.append(next_obs)
+
+    return obs, actions
 
 def sample_trajectory(sampler, rew_end_model, obs, actions, trajectory_length):
     obs = [x for x in obs]
     actions = [x for x in actions]
 
-    assert len(obs) == len(actions)
+    assert len(obs) == len(actions)+1
 
     rew = []
     end = []
 
     for _ in range(trajectory_length):
-        if len(obs) == len(actions) + 1:
-            actions.append(random.randint(0, num_actions - 1))
-        elif len(obs) == len(actions):
-            pass
-        else:
-            assert False
+        actions.append(random.randint(0, num_actions - 1))
 
         obs_ = torch.cat(obs[-num_steps_conditioning:], dim=0).unsqueeze(0)
         act_ = torch.tensor(actions[-num_steps_conditioning:], device=device, dtype=torch.long).unsqueeze(0)
