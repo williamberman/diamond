@@ -42,12 +42,17 @@ def main(cfg: DictConfig):
     actions = []
 
     ctr = 0
+    lives_1_started = False
 
     while True:
         print(ctr)
 
-        if ctr == 0 or info['lives'] != 1:
+        if ctr == 0 or info['lives'] != 1 or not lives_1_started:
             action = 1
+
+            if info['lives'] == 1 and not lives_1_started:
+                print("started playing with 1 life")
+                lives_1_started = True
         else:
             action = choose_action(sampler, rew_end_model, obs, actions)
 
