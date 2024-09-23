@@ -67,7 +67,7 @@ def main():
         step += 1
 
 @torch.no_grad()
-def validation(model, use_hold_out):
+def validation(model, use_hold_out, mapping=None, dbg=False):
     model.eval()
 
     dataloader = DataLoader(TorchDataset(use_hold_out=use_hold_out, infini_iter=False), batch_size=128, num_workers=0)
@@ -90,18 +90,31 @@ def validation(model, use_hold_out):
         #     x.save(f"inp/{i}.png")
 
         target_actions = batch["actions"].to(device)[:, :-1]
-        out_of += target_actions.numel()
 
-        # actions_to_str = {
-        #     0: "NOOP",
-        #     1: "FIRE",
-        #     2: "RIGHT",
-        #     3: "LEFT",
-        # }
-        # for i, (ba, pba) in enumerate(zip(target_actions, min_encoding_indices)):
-        #     print(f"{i}: {actions_to_str[ba[-1].item()]} -> {pba[-1].item()}")
-        #     if i > 20:
-        #         break
+        if dbg:
+            foo = [Image.fromarray(x).resize((256,256)) for x in pred_frames.mul(0.5).add(0.5).mul(255).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()]
+            os.makedirs("pred", exist_ok=True)
+            for i, x in enumerate(foo):
+                x.save(f"pred/{i}.png")
+
+            bar = [Image.fromarray(x).resize((256,256)) for x in frames[:, -1].mul(0.5).add(0.5).mul(255).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()]
+            os.makedirs("inp", exist_ok=True)
+            for i, x in enumerate(bar):
+                x.save(f"inp/{i}.png")
+
+            actions_to_str = {
+                0: "NOOP",
+                1: "FIRE",
+                2: "RIGHT",
+                3: "LEFT",
+            }
+            for i, (ba, pba) in enumerate(zip(target_actions, min_encoding_indices)):
+                pba = pba[-1].item()
+                if mapping is not None:
+                    pba = actions_to_str[mapping[pba]]
+                print(f"{i}: {actions_to_str[ba[-1].item()]} -> {pba}")
+                if i > 40:
+                    break
 
         # import ipdb; ipdb.set_trace()
 
@@ -130,7 +143,11 @@ def validation(model, use_hold_out):
 
     print(f"max_mapping_ctr: {max_mapping_ctr}, max_mapping_score: {max_mapping_score}, {max_mapping_score / out_of}")
 
+    best_map = list(permutations(range(4)))[max_mapping_ctr]
+
     model.train()
+
+    return best_map
 
 class TorchDataset(torch.utils.data.IterableDataset):
     def __init__(self, use_hold_out=False, infini_iter=True):
