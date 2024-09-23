@@ -22,6 +22,8 @@ initialization:
   load_rew_end_model: True
   load_actor_critic: True
 
+only_run_validation: False
+
 common:
   device: cuda:0
   seed: null
