@@ -79,16 +79,6 @@ def validation(model, use_hold_out, mapping=None, dbg=False):
         pred_frames, mse_loss, vq_loss, min_encoding_indices = model(frames)
         loss = mse_loss + vq_loss
 
-        # foo = [Image.fromarray(x).resize((256,256)) for x in pred_frames.mul(0.5).add(0.5).mul(255).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()]
-        # os.makedirs("pred", exist_ok=True)
-        # for i, x in enumerate(foo):
-        #     x.save(f"pred/{i}.png")
-
-        # bar = [Image.fromarray(x).resize((256,256)) for x in frames[:, -1].mul(0.5).add(0.5).mul(255).clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()]
-        # os.makedirs("inp", exist_ok=True)
-        # for i, x in enumerate(bar):
-        #     x.save(f"inp/{i}.png")
-
         target_actions = batch["actions"].to(device)[:, :-1]
 
         if dbg:
