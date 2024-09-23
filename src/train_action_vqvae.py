@@ -100,7 +100,7 @@ class TorchDataset(torch.utils.data.IterableDataset):
         self.use_hold_out = use_hold_out
         self.infini_iter = infini_iter
 
-        self.ds = Dataset("/mnt/raid/diamond/action_autoencoder/dataset/Breakout_recordings_100k_labeled_100/")
+        self.ds = Dataset("/mnt/raid/diamond/action_autoencoder/dataset/Breakout_recordings_100k_correct/")
         self.ds.load_from_default_path()
 
         hold_out = 10_000
