@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from itertools import permutations
 from collections import defaultdict
 import tqdm
+from vector_quantize_pytorch import VectorQuantize
 
 logger = logging.get_logger(__name__)
 
@@ -46,11 +47,12 @@ def main():
             "mse_loss": mse_loss.item(),
             "vq_loss": vq_loss.item(),
             "grad_norm": grad_norm.item(),
+            "indices_used": min_encoding_indices.unique().tolist(),
         }
 
         print(f"{step}: {log_args}")
 
-        if (step+1) % 200 == 0:
+        if (step+1) % 500 == 0:
             validation(model)
 
         step += 1
@@ -169,7 +171,7 @@ class ActionVQVAE(nn.Module):
             attention_dropout=0.0,
             mlp_bias=False,
         )
-        self.latent_dim = 16
+        self.latent_dim = 6
 
         self.in_proj = nn.Linear(3*(4**2), hidden_size)
         self.encoder = LlamaModel(LlamaConfig(
@@ -177,9 +179,28 @@ class ActionVQVAE(nn.Module):
             max_position_embeddings=image_seq_len*(context_n_frames-1),
         ))
 
-        self.bottleneck = nn.Linear(hidden_size, self.latent_dim)
-        self.quantizer = VectorQuantizer(n_e=4, e_dim=self.latent_dim, beta=0.25)
-        self.un_bottleneck = nn.Linear(self.latent_dim, hidden_size)
+        # self.bottleneck = nn.Linear(hidden_size, self.latent_dim)
+        # self.quantizer = VectorQuantizer(n_e=4, e_dim=self.latent_dim, beta=0.01)
+        # self.quantizer = LFQ(codebook_size=64, entropy_loss_weight=0.25)
+        # self.un_bottleneck = nn.Linear(self.latent_dim, hidden_size)
+
+        self.quantizer = VectorQuantize(
+            dim=hidden_size,
+            codebook_size=4,
+            codebook_dim=16,
+            heads=1,
+            separate_codebook_per_head=False,
+            decay=0.99,
+            eps=1e-5, # XXX
+            use_cosine_sim=True,
+            layernorm_after_project_in=True,
+            threshold_ema_dead_code=2,
+            channel_last=True, # XXX
+            accept_image_fmap=False, # XXX
+            commitment_weight=1.0,
+            stochastic_sample_codes=True,
+            ema_update=True,
+        )
 
         self.decoder = LlamaModel(LlamaConfig(
             **config,
@@ -202,12 +223,19 @@ class ActionVQVAE(nn.Module):
         frames = self.encoder(inputs_embeds=frames, use_cache=False).last_hidden_state
 
         last_tokens = frames[:, -1:, :]
-        last_tokens = self.bottleneck(last_tokens)
-        assert last_tokens.shape == (frames.shape[0], 1, self.latent_dim)
+        # last_tokens = self.bottleneck(last_tokens)
+        # assert last_tokens.shape == (frames.shape[0], 1, self.hidden_size)
 
-        vq_loss, z_q, perplexity, min_encodings, min_encoding_indices = self.quantizer(last_tokens)
+        # vq_loss, z_q, perplexity, min_encodings, min_encoding_indices = self.quantizer(last_tokens)
+        # ret = self.quantizer(last_tokens)
+        # z_q = ret.quantized
+        # min_encoding_indices = ret.indices
+        # vq_loss = ret.entropy_aux_loss
+        # print(min_encoding_indices.unique())
 
-        z_q = self.un_bottleneck(z_q)
+        z_q, min_encoding_indices, vq_loss = self.quantizer(last_tokens)
+
+        # z_q = self.un_bottleneck(z_q)
 
         frames = torch.concat([
             input_frames, 
@@ -452,7 +480,7 @@ class LlamaModel(LlamaPreTrainedModel):
         return causal_mask
 
 
-class VectorQuantizer(nn.Module):
+class VectorQuantizerOld(nn.Module):
     """
     Discretization bottleneck part of the VQ-VAE.
 
@@ -463,7 +491,7 @@ class VectorQuantizer(nn.Module):
     """
 
     def __init__(self, n_e, e_dim, beta):
-        super(VectorQuantizer, self).__init__()
+        super(VectorQuantizerOld, self).__init__()
         self.n_e = n_e
         self.e_dim = e_dim
         self.beta = beta
@@ -516,6 +544,7 @@ class VectorQuantizer(nn.Module):
         # perplexity
         e_mean = torch.mean(min_encodings, dim=0)
         perplexity = torch.exp(-torch.sum(e_mean * torch.log(e_mean + 1e-10)))
+        # print(min_encoding_indices.unique())
 
         # reshape back to match original input shape
         # z_q = z_q.permute(0, 3, 1, 2).contiguous()
