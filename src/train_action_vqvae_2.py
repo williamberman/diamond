@@ -85,7 +85,12 @@ def validation(model, use_hold_out, mapping=None, dbg=False, n_batches=None):
     action_mapping_scores = defaultdict(int)
     out_of = 0
 
-    for ctr, batch in enumerate(tqdm.tqdm(dataloader, total=min(n_batches, len(dataloader)))):
+    if n_batches is None:
+        total = len(dataloader)
+    else:
+        total = min(n_batches, len(dataloader))
+
+    for ctr, batch in enumerate(tqdm.tqdm(dataloader, total=total)):
         frames = batch["frames"].to(device)
         pred_frames, mse_loss, vq_loss, min_encoding_indices = model(frames)
         loss = mse_loss + vq_loss
