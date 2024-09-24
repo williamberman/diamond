@@ -16,6 +16,9 @@ from collections import defaultdict
 OmegaConf.register_new_resolver("eval", eval)
 
 torch.set_grad_enabled(False)
+torch.set_float32_matmul_precision('high')
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 device = 2
 
@@ -29,14 +32,16 @@ def main(cfg: DictConfig):
     test_env = make_atari_env(num_envs=cfg.collection.test.num_envs, device=device, **cfg.env.test)
     num_actions = int(test_env.num_actions)
 
-    agent = Agent(instantiate(cfg.agent, num_actions=num_actions)).to(device)
+    agent = Agent(instantiate(cfg.agent, num_actions=num_actions)).to(device, dtype=torch.bfloat16)
     agent.load_state_dict(torch.load(ckpt, map_location=torch.device("cpu")))
     agent.eval()
 
-    sampler = DiffusionSampler(agent.denoiser, cfg.world_model_env.diffusion_sampler)
+    num_steps_conditioning = agent.denoiser.inner_model.cfg.num_steps_conditioning
 
-    num_steps_conditioning = sampler.denoiser.inner_model.cfg.num_steps_conditioning
-    rew_end_model = agent.rew_end_model
+    denoiser = torch.compile(agent.denoiser, mode="reduce-overhead")
+    rew_end_model = torch.compile(agent.rew_end_model, mode="reduce-overhead")
+
+    sampler = DiffusionSampler(denoiser, cfg.world_model_env.diffusion_sampler)
 
     state, info = test_env.reset()
     obs = [state]
@@ -182,6 +187,9 @@ def rollout_trajectory(sampler, rew_end_model, obs, actions, rollout):
         next_obs = sampler.sample_next_obs(obs_, act_)[0]
 
         next_obs_ = torch.cat([obs_[:, 1:], next_obs.unsqueeze(1)], dim=1)
+        obs_ = obs_.contiguous()
+        act_ = act_.contiguous()
+        next_obs_ = next_obs_.contiguous()
         rew_, end_, _ = rew_end_model(obs_, act_, next_obs_)
         rew_ = rew_[:, -1, :].argmax(dim=-1) - 1
         end_ = end_[:, -1, :].argmax(dim=-1)
@@ -223,6 +231,9 @@ def sample_trajectory(sampler, rew_end_model, obs, actions, trajectory_length):
         assert obs_.shape[:2] == next_obs_.shape[:2]
         assert obs_.shape[:2] == act_.shape[:2]
 
+        obs_ = obs_.contiguous()
+        act_ = act_.contiguous()
+        next_obs_ = next_obs_.contiguous()
         rew_, end_, _ = rew_end_model(obs_, act_, next_obs_)
 
         rew_ = rew_[:, -1, :].argmax(dim=-1, keepdim=True) - 1
