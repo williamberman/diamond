@@ -104,14 +104,14 @@ def choose_action(sampler, rew_end_model, obs, actions):
     all_end = defaultdict(list)
 
     init_search_actions_ = init_search_actions(5)
-    n_samples = 1
+    n_samples = 2
 
     pbar = tqdm.tqdm(total=len(init_search_actions_)*n_samples)
 
     for init_act in init_search_actions_:
         obs_, actions_ = rollout_trajectory(sampler, rew_end_model, obs, actions, init_act)
         for _ in range(n_samples):
-            rew, end = sample_trajectory(sampler, rew_end_model, obs_, actions_, 40)
+            rew, end = sample_trajectory(sampler, rew_end_model, obs_, actions_, 20)
             all_rew[tuple(init_act)].append(rew)
             all_end[tuple(init_act)].append(end)
             pbar.update(1)
@@ -121,7 +121,7 @@ def choose_action(sampler, rew_end_model, obs, actions):
 
     pbar.close()
 
-    best_rew = -float("inf")
+    best_rew = 0
     best_action = None
 
     for action in avg_rews.keys():
@@ -189,10 +189,14 @@ def sample_trajectory(sampler, rew_end_model, obs, actions, trajectory_length):
     assert len(rew) == trajectory_length
     assert len(end) == trajectory_length
 
-    rew = sum(rew)
-    end = any(end)
+    rew_ = sum(rew)
+    end_ = any(end)
 
-    return rew, end
+    # if rew_ > 0:
+    #     import ipdb; ipdb.set_trace()
+    #     save(obs[-trajectory_length-5:], "foo")
+
+    return rew_, end_
 
 
 if __name__ == "__main__":
