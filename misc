@@ -172,7 +172,20 @@ python src/main.py \
     rew_end_model.train=False \
     actor_critic.train=False \
     initialization.path_to_ckpt=/workspace/Breakout.pt \
-    evaluation.every=3 \
     collection.test.num_episodes=100 \
     only_run_validation=True
+
+python src/main.py \
+    env.train.id=BreakoutNoFrameskip-v4 \
+    wandb.mode=disabled \
+    common.device=cuda:2 \
+    denoiser.train=False \
+    rew_end_model.train=True \
+    actor_critic.train=False \
+    initialization.path_to_ckpt=/workspace/Breakout.pt 
+    # collection.test.num_episodes=4 \
+    # only_run_validation=True
+
+# run search to see how good just world model is
+python src/searchy_boi.py
 ```
