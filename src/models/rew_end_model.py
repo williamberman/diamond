@@ -126,6 +126,9 @@ class RewEndEncoder(nn.Module):
         self.downsamples = nn.ModuleList([nn.Identity()] + [Downsample(c) for c in channels[:-1]] + [nn.Identity()])
 
     def forward(self, x: Tensor, cond: Tensor) -> Tensor:
+        dtype = self.conv_in.weight.dtype
+        x = x.to(dtype)
+        cond = cond.to(dtype)
         x = self.conv_in(x)
         for block, down in zip(self.blocks, self.downsamples):
             x = down(x)
