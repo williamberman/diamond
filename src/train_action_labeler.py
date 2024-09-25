@@ -371,6 +371,8 @@ def write_new_dataset(train_df, test_df, model):
     episode_data = {}
 
     num_right = 0
+    num_right_actions = 0
+    num_right_rewards = 0
 
     for dir in df.dir.unique():
         dir_df = df[df.dir == dir]
@@ -408,13 +410,19 @@ def write_new_dataset(train_df, test_df, model):
                     target_rew = row['reward'].sign().item()
                     assert target_rew in [-1, 0, 1]
 
+                    if act == row['action']:
+                        num_right_actions += 1
+
+                    if rew == target_rew:
+                        num_right_rewards += 1
+
                     if act == row['action'] and rew == target_rew:
                         num_right += 1
 
                 episodes[f"{dir}_{episode_id}"].append((obs, act, rew, end, trunc))
 
                 pbar.update(1)
-                pbar.set_postfix(num_right=num_right)
+                pbar.set_postfix(num_right=num_right, num_right_actions=num_right_actions, num_right_rewards=num_right_rewards)
 
     pbar.close()
 
@@ -475,7 +483,9 @@ def write_new_dataset(train_df, test_df, model):
 
     pbar.close()
 
-    print(f"Num right: {num_right}/{len(test_df)} {num_right/len(test_df):.2f}")
+    print(f"Num right: {num_right/len(test_df):.2f}%")
+    print(f"Num right actions: {num_right_actions/len(test_df):.2f}%")
+    print(f"Num right rewards: {num_right_rewards/len(test_df):.2f}%")
 
     print(f"len(df): {len(df)} len(ds): {len(ds)}")
 
