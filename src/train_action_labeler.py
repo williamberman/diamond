@@ -12,12 +12,17 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from sklearn.model_selection import train_test_split
-from models import ImprovedCNN
+from models import AnotherCNN
 from data import Dataset, Episode
 import glob
 import concurrent.futures
 import tqdm
 from collections import defaultdict
+from PIL import ImageDraw
+import gymnasium as gym
+
+context_n_frames = 10
+assert context_n_frames == 10
 
 def load_data_from_parquet(directory):
     all_data = []
@@ -36,25 +41,37 @@ def load_data_from_dataset(directory):
         for episode_id in range(dataset.num_episodes):
             episode = dataset.load_episode(episode_id)
 
-            for i in range(len(episode)):
-                if i == len(episode)-1:
-                    next_state = None
-                else:
-                    next_state = episode.obs[i+1]
+            for predicting_for_episode_idx in range(len(episode)):
+                state_imgs = []
 
-                state = episode.obs[i]
-                action = episode.act[i].item()
+                for i in [4, 3, 2, 1]:
+                    if predicting_for_episode_idx - i >= 0:
+                        state_imgs.append(episode.obs[predicting_for_episode_idx - i])
+                    else:
+                        state_imgs.append(torch.zeros_like(episode.obs[0]))
+
+                image_predicting_for = episode.obs[predicting_for_episode_idx]
+                state_imgs.append(episode.obs[predicting_for_episode_idx])
+                action = episode.act[predicting_for_episode_idx].item()
+
+                for i in [1,2,3,4,5]:
+                    if predicting_for_episode_idx + i < len(episode):
+                        state_imgs.append(episode.obs[predicting_for_episode_idx + i])
+                    else:
+                        state_imgs.append(torch.zeros_like(episode.obs[0]))
+
+                assert len(state_imgs) == context_n_frames
 
                 all_data.append({
-                    'state_img': state,
-                    'next_state_img': next_state,
+                    'state_img': state_imgs,
+                    'image_predicting_for': image_predicting_for,
                     'action': action,
                     'episode_id': episode_id,
-                    'reward': episode.rew[i],
-                    'end': episode.end[i],
-                    'trunc': episode.trunc[i],
+                    'reward': episode.rew[predicting_for_episode_idx],
+                    'end': episode.end[predicting_for_episode_idx],
+                    'trunc': episode.trunc[predicting_for_episode_idx],
                     'dir': dir,
-                    'step_id': i,
+                    'step_id': predicting_for_episode_idx,
                 })
 
         df = pd.DataFrame(all_data)
@@ -64,19 +81,25 @@ def load_data_from_dataset(directory):
     if len([x for x in os.listdir(directory) if x.endswith('.pt')]) > 0:
         df = dataset_to_df(directory)
     else:
-        datasets = []
+        # sort the directories and add them in the same order so that 
+        # splitting the dataframe later will result in the same
+        # train/test split order across different runs. Also requires
+        # the same random state for the train/test split
 
         dirs = [os.path.join(directory, x) for x in os.listdir(directory)]
+        dirs = sorted(dirs)
+
+        datasets = [None] * len(dirs)
 
         pbar = tqdm.tqdm(total=len(dirs))
 
-        def do(dir):
+        def do(ctr, dir):
             df = dataset_to_df(dir)
-            datasets.append(df)
+            datasets[ctr] = df
             pbar.update(1)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(do, x) for x in dirs]
+            futures = [executor.submit(do, ctr, dir) for ctr, dir in enumerate(dirs)]
             for future in concurrent.futures.as_completed(futures):
                 future.result()
 
@@ -94,8 +117,6 @@ def preprocess_data(df):
 
 class StateActionDataset(Dataset):
     def __init__(self, df):
-        # the last step in an episode as None for next_state_img. we keep them around in the dataframe for writing out the new dataset but we don't use them for training the classifier
-        df = df[df.next_state_img.notna()]
         self.df = df
 
     def __len__(self):
@@ -103,40 +124,79 @@ class StateActionDataset(Dataset):
 
     def __getitem__(self, idx):
         state = self.df.iloc[idx]['state_img']
-        next_state = self.df.iloc[idx]['next_state_img']
         action = self.df.iloc[idx]['action']
+        state = torch.stack(state)
+        t, c, h, w = state.shape
+        state = state.reshape((t*c, h, w))
+        return state, action
 
-        if not isinstance(state, torch.Tensor):
-            # the torch tensors loaded from the dataset are already correctly normalized etc..
-            state = torch.tensor(np.array(state.resize((64, 64))))
-            state = state.permute(2, 0, 1).float().div(255).sub(0.5).div(0.5)
-        
-        if not isinstance(next_state, torch.Tensor):
-            next_state = torch.tensor(np.array(next_state.resize((64, 64))))
-            next_state = next_state.permute(2, 0, 1).float().div(255).sub(0.5).div(0.5)
+@torch.no_grad()
+def evaluate_model(model, data_loader, criterion, device, id, take=None):
+    if args.dbg:
+        action_strs = gym.make(args.game).get_action_meanings()
 
-        delta = next_state - state
-
-        return delta, action
-
-def evaluate_model(model, data_loader, criterion, device):
-    model.eval()
+    model.eval() # TODO - wtf
     total_loss = 0
     correct = 0
     total = 0
-    with torch.no_grad():
-        for inputs, labels in data_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            total_loss += loss.item()
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+    ctr = 0
+
+    for inputs, labels in tqdm.tqdm(data_loader):
+        inputs, labels = inputs.to(device), labels.to(device)
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        total_loss += loss.item()
+        _, predicted = torch.max(outputs.data, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+        ctr += 1
+
+        if args.dbg:
+            wrong_predictions_dir = os.path.join(args.checkpoint_dir, id, f"wrong_predictions")
+            right_predictions_dir = os.path.join(args.checkpoint_dir, id, f"right_predictions")
+
+            os.makedirs(wrong_predictions_dir, exist_ok=True)
+            os.makedirs(right_predictions_dir, exist_ok=True)
+
+            for i in range(len(inputs)):
+                input = inputs[i]
+                prediction = predicted[i]
+                label = labels[i]
+
+                # turn inputs into images
+                input = input.mul(0.5).add(0.5).mul(255).clamp(0, 255).byte().reshape(context_n_frames, 3, 64, 64).permute(0, 2, 3, 1).cpu().numpy()
+                input = [Image.fromarray(x).resize((256, 256)) for x in input]
+
+                # paste all the images into a single image
+                paste_into = Image.new('RGB', (256*(context_n_frames+1), 256))
+                for j, img in enumerate(input):
+                    if j <= 5:
+                        paste_into.paste(img, (256*j, 0))
+                    else:
+                        paste_into.paste(img, (256*(j+1), 0))
+
+                prediction_action_text = f"predicted: {action_strs[prediction.item()]}"
+                actual_action_text = f"actual: {action_strs[label.item()]}"
+
+                paste_into_ = paste_into.copy()
+
+                draw = ImageDraw.Draw(paste_into_)
+                draw.text((256*(6)+20, 64), prediction_action_text, fill=(255, 255, 255))
+                draw.text((256*(6)+20, 64+128), actual_action_text, fill=(255, 255, 255))
+
+                # save the input images
+                if prediction == label:
+                    paste_into_.save(os.path.join(right_predictions_dir, f"{ctr}_{i}.png"))
+                else:
+                    paste_into_.save(os.path.join(wrong_predictions_dir, f"{ctr}_{i}.png"))
+
+        if take is not None and ctr >= take:
+            break
     
-    avg_loss = total_loss / len(data_loader)
+    avg_loss = total_loss / ctr
     accuracy = 100 * correct / total
     model.train()
+    print(f"Loss: {avg_loss:.4f} Accuracy: {accuracy:.2f}%")
     return avg_loss, accuracy
 
 def train_model(model, train_loader, test_loader, criterion, optimizer, num_epochs, device):
@@ -145,6 +205,7 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
     for epoch in range(num_epochs):
         model.train()
         total_train_loss = 0
+        train_loss_ctr = 0
         for step, (inputs, labels) in enumerate(train_loader, 1):
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -155,12 +216,13 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
             optimizer.step()
 
             total_train_loss += loss.item()
+            train_loss_ctr += 1
             if step % 100 == 0:
                 print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, Train Loss: {loss.item():.4f} grad_norm: {grad_norm.item():.4f}')
 
         if (epoch+1) % args.eval_every_n_epochs == 0 or epoch == num_epochs - 1:
-            train_loss, train_accuracy = evaluate_model(model, train_loader, criterion, device)
-            test_loss, test_accuracy = evaluate_model(model, test_loader, criterion, device)
+            train_loss, train_accuracy = evaluate_model(model, train_loader, criterion, device, id=f"{epoch}_train")
+            test_loss, test_accuracy = evaluate_model(model, test_loader, criterion, device, id=f"{epoch}_test")
         else:
             train_loss, train_accuracy = 0, 0
             test_loss, test_accuracy = 0, 0
@@ -168,7 +230,7 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
         print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, '
               f'Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.2f}%, '
               f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}% '
-              f'Avg Train Loss over epoch: {total_train_loss / steps_per_epoch:.4f} ')
+              f'Avg Train Loss over epoch: {total_train_loss / train_loss_ctr:.4f} ')
     
         torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"action_labeler_{epoch+1}.pt"))
 
@@ -206,12 +268,17 @@ def main(args):
     test_loader = DataLoader(test_dataset, num_workers=0, batch_size=args.batch_size, shuffle=False)
 
     num_classes = df['action'].max() + 1
-    model = ImprovedCNN(num_classes).to(device).train()
+    # model = SimpleCNN(context_n_frames=context_n_frames, num_classes=num_classes).to(device).train()
+    model = AnotherCNN(context_n_frames=context_n_frames, num_classes=num_classes).to(device).train()
+    # model.load_state_dict(torch.load(os.path.join(args.checkpoint_dir, f"action_labeler_final.pt")))
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     train_model(model, train_loader, test_loader, criterion, optimizer, args.epochs, device)
+
+    # evaluate_model(model, train_loader, criterion, device, id="final_train")
+    # evaluate_model(model, test_loader, criterion, device, id="final_test")
 
     if args.write_new_dataset_dir is not None:
         write_new_dataset(train_df, test_df, model)
@@ -246,16 +313,18 @@ def write_new_dataset(train_df, test_df, model):
             for step_id in step_ids:
                 row = episode_df[episode_df.step_id == step_id].iloc[0]
 
-                obs = row['state_img']
+                obs = row['image_predicting_for']
                 act = row['action']
                 episode_id = row['episode_id']
                 rew = row['reward']
                 end = row['end']
                 trunc = row['trunc']
 
-                if row['split'] == 'test' and row['next_state_img'] != None:
-                    delta = (row['next_state_img']-row['state_img']).to(args.gpu).unsqueeze(0)
-                    act = model(delta).argmax().item()
+                if row['split'] == 'test':
+                    state_img = torch.stack(row['state_img'])
+                    t, c, h, w = state_img.shape
+                    model_input = state_img.reshape(t*c, h, w).unsqueeze(0).to(args.gpu)
+                    act = model(model_input).argmax().item()
                     if act == row['action']:
                         num_right += 1
 
@@ -324,6 +393,8 @@ def write_new_dataset(train_df, test_df, model):
 
     print(f"Num right: {num_right}/{len(test_df)} {num_right/len(test_df):.2f}")
 
+    print(f"len(df): {len(df)} len(ds): {len(ds)}")
+
     assert len(df) == len(ds)
 
     ds.is_static = True
@@ -341,6 +412,8 @@ if __name__ == "__main__":
     parser.add_argument("--train_size", type=float, default=0.95, help="Proportion of data to use for training")
     parser.add_argument("--write_new_dataset_dir", type=str, default=None, help="If set, write a new dataset to this directory")
     parser.add_argument("--eval_every_n_epochs", type=int, default=5, help="Evaluate the model every n epochs")
+    parser.add_argument("--game", type=str, default=None, required=False, help="Game to evaluate on")
+    parser.add_argument("--dbg", action='store_true', help="Debug mode")
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
