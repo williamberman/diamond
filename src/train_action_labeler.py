@@ -125,30 +125,61 @@ class StateActionDataset(Dataset):
     def __getitem__(self, idx):
         state = self.df.iloc[idx]['state_img']
         action = self.df.iloc[idx]['action']
+
+        reward = self.df.iloc[idx]['reward']
+        reward = reward.sign().to(torch.long) + 1
+        assert reward.item() in [0, 1, 2]
+
         state = torch.stack(state)
         t, c, h, w = state.shape
         state = state.reshape((t*c, h, w))
-        return state, action
+
+        return state, action, reward
 
 @torch.no_grad()
 def evaluate_model(model, data_loader, criterion, device, id, take=None):
     if args.dbg:
         action_strs = gym.make(args.game).get_action_meanings()
 
-    model.eval() # TODO - wtf
+    model.eval()
+
     total_loss = 0
+    total_loss_actions = 0
+    total_loss_rewards = 0
+
     correct = 0
+    correct_actions = 0
+    correct_rewards = 0
+
     total = 0
     ctr = 0
 
-    for inputs, labels in tqdm.tqdm(data_loader):
-        inputs, labels = inputs.to(device), labels.to(device)
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
+    for inputs, action_labels, reward_labels  in tqdm.tqdm(data_loader):
+
+        inputs, action_labels, reward_labels = inputs.to(device), action_labels.to(device), reward_labels.to(device)
+        outputs_actions, outputs_rewards = model(inputs)
+
+        loss_actions = criterion(outputs_actions, action_labels)
+
+        loss_rewards = criterion(outputs_rewards, reward_labels)
+
+        loss = loss_actions + loss_rewards
+
         total_loss += loss.item()
-        _, predicted = torch.max(outputs.data, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
+        total_loss_actions += loss_actions.item()
+        total_loss_rewards += loss_rewards.item()
+
+        _, predicted_actions = torch.max(outputs_actions.data, 1)
+        _, predicted_rewards = torch.max(outputs_rewards.data, 1)
+
+        total += action_labels.size(0)
+
+        correct += ((predicted_actions == action_labels) & (predicted_rewards == reward_labels)).sum().item()
+
+        correct_actions += (predicted_actions == action_labels).sum().item()
+
+        correct_rewards += (predicted_rewards == reward_labels).sum().item()
+
         ctr += 1
 
         if args.dbg:
@@ -160,8 +191,12 @@ def evaluate_model(model, data_loader, criterion, device, id, take=None):
 
             for i in range(len(inputs)):
                 input = inputs[i]
-                prediction = predicted[i]
-                label = labels[i]
+
+                prediction_action = predicted_actions[i]
+                prediction_reward = predicted_rewards[i]
+
+                label_action = action_labels[i]
+                label_reward = reward_labels[i]
 
                 # turn inputs into images
                 input = input.mul(0.5).add(0.5).mul(255).clamp(0, 255).byte().reshape(context_n_frames, 3, 64, 64).permute(0, 2, 3, 1).cpu().numpy()
@@ -175,17 +210,22 @@ def evaluate_model(model, data_loader, criterion, device, id, take=None):
                     else:
                         paste_into.paste(img, (256*(j+1), 0))
 
-                prediction_action_text = f"predicted: {action_strs[prediction.item()]}"
-                actual_action_text = f"actual: {action_strs[label.item()]}"
+                prediction_action_text = f"predicted action: {prediction_action.item()}"
+                actual_action_text = f"actual action: {label_action.item()}"
+
+                prediction_reward_text = f"predicted reward: {prediction_reward.item()}"
+                actual_reward_text = f"actual reward: {label_reward.item()}"
 
                 paste_into_ = paste_into.copy()
 
                 draw = ImageDraw.Draw(paste_into_)
-                draw.text((256*(6)+20, 64), prediction_action_text, fill=(255, 255, 255))
-                draw.text((256*(6)+20, 64+128), actual_action_text, fill=(255, 255, 255))
+                draw.text((256*(6)+20, 10), prediction_action_text, fill=(255, 255, 255))
+                draw.text((256*(6)+20, 10+64), actual_action_text, fill=(255, 255, 255))
+                draw.text((256*(6)+20, 10+64*2), prediction_reward_text, fill=(255, 255, 255))
+                draw.text((256*(6)+20, 10+64*3), actual_reward_text, fill=(255, 255, 255))
 
                 # save the input images
-                if prediction == label:
+                if prediction_action == label_action and prediction_reward == label_reward:
                     paste_into_.save(os.path.join(right_predictions_dir, f"{ctr}_{i}.png"))
                 else:
                     paste_into_.save(os.path.join(wrong_predictions_dir, f"{ctr}_{i}.png"))
@@ -194,43 +234,77 @@ def evaluate_model(model, data_loader, criterion, device, id, take=None):
             break
     
     avg_loss = total_loss / ctr
+    avg_loss_actions = total_loss_actions / ctr
+    avg_loss_rewards = total_loss_rewards / ctr
+
     accuracy = 100 * correct / total
+    accuracy_actions = 100 * correct_actions / total
+    accuracy_rewards = 100 * correct_rewards / total    
+
     model.train()
-    print(f"Loss: {avg_loss:.4f} Accuracy: {accuracy:.2f}%")
-    return avg_loss, accuracy
+
+    return (
+        avg_loss, accuracy, 
+        avg_loss_actions, accuracy_actions, 
+        avg_loss_rewards, accuracy_rewards
+    )
 
 def train_model(model, train_loader, test_loader, criterion, optimizer, num_epochs, device):
     steps_per_epoch = len(train_loader)
 
     for epoch in range(num_epochs):
         model.train()
+
         total_train_loss = 0
+        total_train_loss_actions = 0
+        total_train_loss_rewards = 0
+
         train_loss_ctr = 0
-        for step, (inputs, labels) in enumerate(train_loader, 1):
-            inputs, labels = inputs.to(device), labels.to(device)
+
+        for step, (inputs, actions, rewards) in enumerate(train_loader, 1):
             optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+
+            inputs, actions, rewards = inputs.to(device), actions.to(device), rewards.to(device)
+
+            pred_actions, pred_rewards = model(inputs)
+
+            loss_actions = criterion(pred_actions, actions)
+            loss_rewards = criterion(pred_rewards, rewards)
+
+            loss = loss_actions + loss_rewards
+
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
             total_train_loss += loss.item()
+            total_train_loss_actions += loss_actions.item()
+            total_train_loss_rewards += loss_rewards.item()
+
             train_loss_ctr += 1
             if step % 100 == 0:
                 print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, Train Loss: {loss.item():.4f} grad_norm: {grad_norm.item():.4f}')
 
-        if (epoch+1) % args.eval_every_n_epochs == 0 or epoch == num_epochs - 1:
-            train_loss, train_accuracy = evaluate_model(model, train_loader, criterion, device, id=f"{epoch}_train")
-            test_loss, test_accuracy = evaluate_model(model, test_loader, criterion, device, id=f"{epoch}_test")
-        else:
-            train_loss, train_accuracy = 0, 0
-            test_loss, test_accuracy = 0, 0
+        print('**************')
+        print(f"Epoch {epoch+1}/{num_epochs}")
+        print(f"Avg Train Loss over epoch: {total_train_loss / train_loss_ctr:.4f} ")
+        print(f'Avg Train Loss Actions: {total_train_loss_actions / train_loss_ctr:.4f} ')
+        print(f'Avg Train Loss Rewards: {total_train_loss_rewards / train_loss_ctr:.4f} ')
 
-        print(f'Epoch {epoch+1}/{num_epochs}, Step {step}/{steps_per_epoch}, '
-              f'Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.2f}%, '
-              f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}% '
-              f'Avg Train Loss over epoch: {total_train_loss / train_loss_ctr:.4f} ')
+        if (epoch+1) % args.eval_every_n_epochs == 0 or epoch == num_epochs - 1:
+            train_loss, train_accuracy, train_loss_actions, train_accuracy_actions, train_loss_rewards, train_accuracy_rewards = evaluate_model(model, train_loader, criterion, device, id=f"{epoch}_train")
+
+            print(f"Train Loss: {train_loss:.4f} Train Accuracy: {train_accuracy:.2f}%")
+            print(f"Train Loss Actions: {train_loss_actions:.4f} Train Accuracy Actions: {train_accuracy_actions:.2f}%")
+            print(f"Train Loss Rewards: {train_loss_rewards:.4f} Train Accuracy Rewards: {train_accuracy_rewards:.2f}%")
+
+            test_loss, test_accuracy, test_loss_actions, test_accuracy_actions, test_loss_rewards, test_accuracy_rewards = evaluate_model(model, test_loader, criterion, device, id=f"{epoch}_test")
+
+            print(f"Test Loss: {test_loss:.4f} Test Accuracy: {test_accuracy:.2f}%")
+            print(f"Test Loss Actions: {test_loss_actions:.4f} Test Accuracy Actions: {test_accuracy_actions:.2f}%")
+            print(f"Test Loss Rewards: {test_loss_rewards:.4f} Test Accuracy Rewards: {test_accuracy_rewards:.2f}%")
+
+        print('**************')
     
         torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"action_labeler_{epoch+1}.pt"))
 
@@ -269,7 +343,7 @@ def main(args):
 
     num_classes = df['action'].max() + 1
     # model = SimpleCNN(context_n_frames=context_n_frames, num_classes=num_classes).to(device).train()
-    model = AnotherCNN(context_n_frames=context_n_frames, num_classes=num_classes).to(device).train()
+    model = AnotherCNN(context_n_frames=context_n_frames, num_classes=num_classes, num_rewards=3).to(device).train()
     # model.load_state_dict(torch.load(os.path.join(args.checkpoint_dir, f"action_labeler_final.pt")))
 
     criterion = nn.CrossEntropyLoss()
@@ -324,13 +398,23 @@ def write_new_dataset(train_df, test_df, model):
                     state_img = torch.stack(row['state_img'])
                     t, c, h, w = state_img.shape
                     model_input = state_img.reshape(t*c, h, w).unsqueeze(0).to(args.gpu)
-                    act = model(model_input).argmax().item()
-                    if act == row['action']:
+
+                    act_logits, rew_logits = model(model_input)
+
+                    act = act_logits.argmax().item()
+                    rew = rew_logits.argmax().item() - 1
+                    assert rew in [-1, 0, 1]
+
+                    target_rew = row['reward'].sign().item()
+                    assert target_rew in [-1, 0, 1]
+
+                    if act == row['action'] and rew == target_rew:
                         num_right += 1
 
                 episodes[f"{dir}_{episode_id}"].append((obs, act, rew, end, trunc))
 
                 pbar.update(1)
+                pbar.set_postfix(num_right=num_right)
 
     pbar.close()
 
