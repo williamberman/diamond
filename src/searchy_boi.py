@@ -11,7 +11,9 @@ from models.diffusion import Denoiser, DiffusionSampler, DiffusionSamplerConfig
 from models.rew_end_model import RewEndModel
 import tqdm
 from collections import defaultdict
-
+import torch.distributed as dist
+import os
+import time
 
 OmegaConf.register_new_resolver("eval", eval)
 
@@ -20,18 +22,103 @@ torch.set_float32_matmul_precision('high')
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-device = 2
+device = int(os.environ['LOCAL_RANK'])
+torch.cuda.set_device(device)
 
 @hydra.main(config_path="../config", config_name="trainer", version_base="1.3")
-def main(cfg: DictConfig):
-    global num_actions, num_steps_conditioning, ctr
+def main(cfg_: DictConfig):
+    global cfg
+    cfg = cfg_
+    cfg.common.device = f"cuda:{device}"
+
+    dist.init_process_group(backend="nccl")
+    init_global_state()
+
+    if device == 0:
+        env_loop_ = env_loop()
+
+    while True:
+        if device == 0:
+            action = env_loop_.step1()
+
+            if action is None:
+                obs_send, actions_send = env_loop_.obs, env_loop_.actions
+
+                obs_send = torch.stack(obs_send, dim=1)
+                actions_send = torch.tensor(actions_send, device=device, dtype=torch.long).unsqueeze(0)
+
+                scatter_data = [obs_send.shape, actions_send.shape, True, env_loop_.ctr]
+
+                obs_send = [obs_send] * dist.get_world_size()
+                actions_send = [actions_send] * dist.get_world_size()
+            else:
+                scatter_data = [None, None, False, env_loop_.ctr]
+                obs_send, actions_send = None, None
+        else:
+            scatter_data = None
+            obs_send, actions_send = None, None
+
+        scatter_data = [scatter_data] * dist.get_world_size()
+        scatter_data_output = [None]
+        dist.scatter_object_list(scatter_data_output, scatter_data, src=0)
+        obs_shape, actions_shape, do_scatter, ctr = scatter_data_output[0]
+
+        if do_scatter:
+            obs = torch.empty(obs_shape, device=device, dtype=torch.float32)
+            actions = torch.empty(actions_shape, device=device, dtype=torch.long)
+
+            dist.scatter(obs, obs_send, 0)
+            dist.scatter(actions, actions_send, 0)
+
+            action, best_rew = choose_action(obs, actions, ctr)
+
+            # gather best_rew
+            best_rew = torch.tensor([best_rew], device=device)
+            if device == 0:
+                best_rew_target = [best_rew] * dist.get_world_size()
+            else:
+                best_rew_target = None
+            dist.gather(best_rew, best_rew_target, 0)
+
+            # gather action
+            action = torch.tensor([action], device=device)
+            if device == 0:
+                action_target = [action] * dist.get_world_size()
+            else:
+                action_target = None
+            dist.gather(action, action_target, 0)
+
+            if device == 0:
+                best_rew = torch.concat(best_rew_target, dim=0).tolist()
+                action = torch.concat(action_target, dim=0).tolist()
+                action_rew = zip(action, best_rew)
+                action_rew = sorted(action_rew, key=lambda x: x[1], reverse=True)
+                action = action_rew[0][0]
+
+        if device == 0:
+            end = env_loop_.step2(action)
+            end = torch.tensor([end], device=device)
+            scatter_data = [end] * dist.get_world_size()
+        else:
+            end = torch.tensor([False], device=device)
+            scatter_data = None
+
+        dist.scatter(end, scatter_data, 0)
+
+        if end:
+            break
+
+    if device == 0:
+        save(env_loop_.obs, env_loop_.ctr)
+        
+def init_global_state():
+    global sampler, rew_end_model, num_steps_conditioning, num_actions
+
+    env = make_atari_env(num_envs=cfg.collection.test.num_envs, device=device, **cfg.env.test)
+    num_actions = int(env.num_actions)
 
     # ckpt = "/mnt/raid/diamond/better4/Breakout_100k_labeled_1000_actor_critic_cont/checkpoints/agent_versions/agent_epoch_01000.pt"
     ckpt = "/workspace/Breakout.pt"
-
-    test_env = make_atari_env(num_envs=cfg.collection.test.num_envs, device=device, **cfg.env.test)
-    num_actions = int(test_env.num_actions)
-
     agent = Agent(instantiate(cfg.agent, num_actions=num_actions)).to(device, dtype=torch.bfloat16)
     agent.load_state_dict(torch.load(ckpt, map_location=torch.device("cpu")))
     agent.eval()
@@ -43,46 +130,54 @@ def main(cfg: DictConfig):
 
     sampler = DiffusionSampler(denoiser, cfg.world_model_env.diffusion_sampler)
 
-    state, info = test_env.reset()
-    obs = [state]
-    actions = []
+class env_loop:
+    def __init__(self):
+        self.env = make_atari_env(num_envs=cfg.collection.test.num_envs, device=device, **cfg.env.test)
+        state, info = self.env.reset()
 
-    ctr = 0
-    lives_1_started = False
-    lives_1_ctr = 0
+        self.info = info
 
-    while True:
-        print(ctr)
+        self.obs = [state]
+        self.actions = []
 
-        did_pred = False
+        self.lives_1_started = False
+        self.lives_1_ctr = 0
 
-        if ctr == 0 or info['lives'] != 1 or not lives_1_started:
+        self.ctr = 0
+
+    def step1(self):
+        print(self.ctr)
+
+        self.did_pred = False
+
+        if self.ctr == 0 or self.info['lives'] != 1 or not self.lives_1_started:
             action = 1
 
-            if info['lives'] == 1 and not lives_1_started:
+            if self.info['lives'] == 1 and not self.lives_1_started:
                 print("started playing with 1 life")
-                lives_1_started = True
+                self.lives_1_started = True
         else:
-            if lives_1_ctr < 10:
+            if self.lives_1_ctr < 10:
                 action = 0
-                lives_1_ctr += 1
+                self.lives_1_ctr += 1
             else:
-                action = choose_action(sampler, rew_end_model, obs, actions)
-                did_pred = True
+                action = None
+                self.did_pred = True
 
-        actions.append(action)
-        state, _, end, trunc, info = test_env.step(torch.tensor([action]))
-        obs.append(state)
+        return action
 
-        if end or trunc:
-            break
+    def step2(self, action):
+        self.actions.append(action)
+        state, _, end, trunc, info = self.env.step(torch.tensor([action]))
+        self.info = info
+        self.obs.append(state)
 
-        if did_pred:
-            save(obs, ctr)
+        if self.did_pred:
+            save(self.obs, self.ctr)
 
-        ctr += 1
+        self.ctr += 1
 
-    save(obs, ctr)
+        return end or trunc
 
 def save(obs, idx):
     if isinstance(obs, list):
@@ -90,7 +185,8 @@ def save(obs, idx):
     obs = obs.permute(0, 2, 3, 1).mul(0.5).add(0.5).mul(255).clamp(0, 255).byte().cpu().numpy()
     obs = [Image.fromarray(x).resize((256, 256)) for x in obs]
     imageio.mimsave(f"/workspace/obs_{idx}.mp4", obs, fps=5)
-    print("saved")
+    if device == 0:
+        print("saved")
 
 # available_sample_actions = [0, 2, 3]
 available_sample_actions = [2, 3]
@@ -111,10 +207,12 @@ def init_search_actions(n):
 
     return rv
 
-def choose_action(sampler, rew_end_model, obs, actions):
-    assert len(obs) == len(actions) + 1
+def choose_action(obs, actions, ctr):
+    assert obs.ndim == 5
+    assert actions.ndim == 2
+    assert obs.shape[1] == actions.shape[1] + 1
 
-    if len(obs) < num_steps_conditioning:
+    if obs.shape[1] < num_steps_conditioning:
         return random.randint(0, num_actions - 1)
 
     all_rew = defaultdict(list)
@@ -123,14 +221,17 @@ def choose_action(sampler, rew_end_model, obs, actions):
     all_actions = defaultdict(list)
 
     init_search_actions_ = init_search_actions(10)
+    init_search_actions_ = [x for i, x in enumerate(init_search_actions_) if i % dist.get_world_size() == device]
     n_samples = 2
 
-    print("doing initial rollout")
-    obs_, actions_, rew, end = rollout_trajectory(sampler, rew_end_model, obs, actions, init_search_actions_)
-    print("done initial rollout")
+    if device == 0:
+        print("doing initial rollout")
+    obs_, actions_, rew, end = rollout_trajectory(obs, actions, init_search_actions_)
+    if device == 0:
+        print("done initial rollout")
 
     for _ in range(n_samples):
-        obs__, actions__, rew_, end_ = sample_trajectory(sampler, rew_end_model, obs_, actions_, 15)
+        obs__, actions__, rew_, end_ = sample_trajectory(obs_, actions_, 15)
         rew_ = torch.cat([rew, rew_], dim=1)
         end_ = torch.cat([end, end_], dim=1)
         rew_ = rew_.sum(dim=-1)
@@ -158,22 +259,22 @@ def choose_action(sampler, rew_end_model, obs, actions):
     if best_action is None:
         best_action = random.choice(list(avg_rews.keys()))
 
-    # print(f"avg_rews: {avg_rews}, ends: {ends}, best_action: {best_action}, best_rew: {best_rew}")
-    print(f"best_action: {best_action}, best_rew: {best_rew}")
+    if device == 0:
+        # print(f"avg_rews: {avg_rews}, ends: {ends}, best_action: {best_action}, best_rew: {best_rew}")
+        print(f"best_action: {best_action}, best_rew: {best_rew}")
 
-    save(all_obs[best_action][0], f"pred_{ctr}_0")
-    save(all_obs[best_action][1], f"pred_{ctr}_1")
+    save(all_obs[best_action][0], f"pred_{ctr}_{device}_0")
+    save(all_obs[best_action][1], f"pred_{ctr}_{device}_1")
 
-    return best_action[0]
+    return best_action[0], best_rew
 
-def rollout_trajectory(sampler, rew_end_model, obs, actions, rollout):
-    obs = [x for x in obs]
-    actions = [x for x in actions]
+def rollout_trajectory(obs, actions, rollout):
+    assert obs.ndim == 5
+    assert actions.ndim == 2
+    assert obs.shape[1] == actions.shape[1] + 1
 
-    assert len(obs) == len(actions) + 1
-
-    obs = torch.cat(obs, dim=0).unsqueeze(0).repeat((len(rollout), 1, 1, 1, 1))
-    actions = torch.tensor(actions, device=device, dtype=torch.long).unsqueeze(0).repeat(len(rollout), 1) 
+    obs = obs.repeat((len(rollout), 1, 1, 1, 1))
+    actions = actions.repeat(len(rollout), 1) 
     rew = None
     end = None
 
@@ -212,14 +313,16 @@ def rand_action_tensor(shape):
         n *= x
     return torch.tensor([random.choice(available_sample_actions) for _ in range(n)], dtype=torch.long, device=device).reshape(shape)
 
-def sample_trajectory(sampler, rew_end_model, obs, actions, trajectory_length):
+def sample_trajectory(obs, actions, trajectory_length):
+    assert obs.ndim == 5
+    assert actions.ndim == 2
     assert obs.shape[0] == actions.shape[0]
     assert obs.shape[1] == actions.shape[1]+1
 
     rew = None
     end = None
 
-    for _ in tqdm.tqdm(range(trajectory_length)):
+    for _ in tqdm.tqdm(range(trajectory_length), disable=device != 0):
         actions = torch.cat([actions, rand_action_tensor((actions.shape[0], 1))], dim=1)
 
         obs_ = obs[:, -num_steps_conditioning:]
