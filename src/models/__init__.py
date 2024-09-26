@@ -120,8 +120,10 @@ class SimpleCNN(nn.Module):
 
 
 class AnotherCNN(nn.Module):
-    def __init__(self, context_n_frames, num_classes):
+    def __init__(self, context_n_frames, num_classes, num_rewards):
         super(AnotherCNN, self).__init__()
+        self.num_classes = num_classes
+        self.num_rewards = num_rewards
 
         class ConvBlock(nn.Module):
             def __init__(self, kernel_size, stride, padding):
@@ -191,7 +193,7 @@ class AnotherCNN(nn.Module):
                 # self.layer_norm1 = nn.LayerNorm(256)
                 # self.act = nn.SiLU()
 
-                self.fc = nn.Linear(dim, num_classes)
+                self.fc = nn.Linear(dim, num_classes+num_rewards)
 
             def forward(self, x):
                 x = self.layer_norm(x)
@@ -212,7 +214,9 @@ class AnotherCNN(nn.Module):
         x15 = self.conv15(x)
         x = torch.cat([x3, x5, x7, x11, x15], dim=1)
         x = self.out(x)
-        return x
+        logits_actions = x[:, :self.num_classes]
+        logits_rewards = x[:, self.num_classes:]
+        return logits_actions, logits_rewards
 
         
         
