@@ -134,7 +134,15 @@ class StateActionDataset(Dataset):
         t, c, h, w = state.shape
         state = state.reshape((t*c, h, w))
 
-        return state, action, reward
+        dir_id = self.df.iloc[idx]['dir'].split('/')[-1]
+        unique_id = f"{dir_id}_{self.df.iloc[idx]['episode_id']}_{self.df.iloc[idx]['step_id']}"
+
+        return dict(
+            state=state,
+            action=action,
+            reward=reward,
+            unique_id=unique_id,
+        )
 
 @torch.no_grad()
 def evaluate_model(model, data_loader, criterion, device, id, take=None):
@@ -154,7 +162,12 @@ def evaluate_model(model, data_loader, criterion, device, id, take=None):
     total = 0
     ctr = 0
 
-    for inputs, action_labels, reward_labels  in tqdm.tqdm(data_loader):
+    for it in tqdm.tqdm(data_loader):
+        inputs = it['state']
+        action_labels = it['action']
+        reward_labels = it['reward']
+
+        unique_ids = it['unique_id']
 
         inputs, action_labels, reward_labels = inputs.to(device), action_labels.to(device), reward_labels.to(device)
         outputs_actions, outputs_rewards = model(inputs)
@@ -210,11 +223,12 @@ def evaluate_model(model, data_loader, criterion, device, id, take=None):
                     else:
                         paste_into.paste(img, (256*(j+1), 0))
 
-                prediction_action_text = f"predicted action: {prediction_action.item()}"
-                actual_action_text = f"actual action: {label_action.item()}"
+                prediction_action_text = f"predicted action: {action_strs[prediction_action.item()]}"
+                actual_action_text = f"actual action: {action_strs[label_action.item()]}"
 
-                prediction_reward_text = f"predicted reward: {prediction_reward.item()}"
-                actual_reward_text = f"actual reward: {label_reward.item()}"
+                reward_strs = ['negative reward', 'no reward', 'positive reward']
+                prediction_reward_text = f"predicted reward: {reward_strs[prediction_reward.item()]}"
+                actual_reward_text = f"actual reward: {reward_strs[label_reward.item()]}"
 
                 paste_into_ = paste_into.copy()
 
@@ -224,11 +238,15 @@ def evaluate_model(model, data_loader, criterion, device, id, take=None):
                 draw.text((256*(6)+20, 10+64*2), prediction_reward_text, fill=(255, 255, 255))
                 draw.text((256*(6)+20, 10+64*3), actual_reward_text, fill=(255, 255, 255))
 
+                unique_id = unique_ids[i]
+
                 # save the input images
                 if prediction_action == label_action and prediction_reward == label_reward:
-                    paste_into_.save(os.path.join(right_predictions_dir, f"{ctr}_{i}.png"))
+                    os.makedirs(os.path.join(right_predictions_dir, reward_strs[label_reward.item()]), exist_ok=True)
+                    paste_into_.save(os.path.join(right_predictions_dir, reward_strs[label_reward.item()], f"{unique_id}.png"))
                 else:
-                    paste_into_.save(os.path.join(wrong_predictions_dir, f"{ctr}_{i}.png"))
+                    os.makedirs(os.path.join(wrong_predictions_dir, reward_strs[label_reward.item()]), exist_ok=True)
+                    paste_into_.save(os.path.join(wrong_predictions_dir, reward_strs[label_reward.item()], f"{unique_id}.png"))
 
         if take is not None and ctr >= take:
             break
@@ -261,8 +279,10 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
 
         train_loss_ctr = 0
 
-        for step, (inputs, actions, rewards) in enumerate(train_loader, 1):
+        for step, it in enumerate(train_loader, 1):
             optimizer.zero_grad()
+
+            inputs, actions, rewards = it['state'], it['action'], it['reward']
 
             inputs, actions, rewards = inputs.to(device), actions.to(device), rewards.to(device)
 
@@ -335,6 +355,24 @@ def main(args):
     test_df['split'] = ['test']*len(test_df)
 
     print(f"Train size: {len(train_df)} Test size: {len(test_df)}")
+
+    train_rewards = torch.stack(train_df.reward.tolist())
+    test_rewards = torch.stack(test_df.reward.tolist())
+
+    train_positive_rewards = (train_rewards > 0).sum().item()
+    train_negative_rewards = (train_rewards < 0).sum().item()
+    train_no_rewards = (train_rewards == 0).sum().item()
+
+    test_positive_rewards = (test_rewards > 0).sum().item()
+    test_negative_rewards = (test_rewards < 0).sum().item()
+    test_no_rewards = (test_rewards == 0).sum().item()
+
+    print(f"Train positive rewards: {train_positive_rewards} negative rewards: {train_negative_rewards} no rewards: {train_no_rewards}")
+    print(f"Test positive rewards: {test_positive_rewards} negative rewards: {test_negative_rewards} no rewards: {test_no_rewards}")
+
+    train_non_zero_rewards = train_positive_rewards + train_negative_rewards
+    test_non_zero_rewards = test_positive_rewards + test_negative_rewards
+    print(f"Train non zero rewards: {train_non_zero_rewards/(train_non_zero_rewards + test_non_zero_rewards):.2f}%")
 
     train_dataset = StateActionDataset(train_df)
     test_dataset = StateActionDataset(test_df)
