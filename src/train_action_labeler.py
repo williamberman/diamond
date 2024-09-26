@@ -376,12 +376,22 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
             print(f"Train Loss: {train_metrics['avg_loss']:.4f} Train Accuracy: {train_metrics['accuracy']:.2f}%")
             print(f"Train Loss Actions: {train_metrics['avg_loss_actions']:.4f} Train Accuracy Actions: {train_metrics['accuracy_actions']:.2f}%")
             print(f"Train Loss Rewards: {train_metrics['avg_loss_rewards']:.4f} Train Accuracy Rewards: {train_metrics['accuracy_rewards']:.2f}%")
+            print(f"Approx positive reward better than neutral: {train_metrics['approx_positive_rew_better_than_neutral']:.2f}%")
+            if 'approx_neutral_rew_better_than_negative' in train_metrics:
+                print(f"Approx neutral reward better than negative: {train_metrics['approx_neutral_rew_better_than_negative']:.2f}%")
+            if 'approx_positive_rew_better_than_negative' in train_metrics:
+                print(f"Approx positive reward better than negative: {train_metrics['approx_positive_rew_better_than_negative']:.2f}%")
 
             test_metrics = evaluate_model(model, test_loader, criterion, device, id=f"{epoch}_test")
 
             print(f"Test Loss: {test_metrics['avg_loss']:.4f} Test Accuracy: {test_metrics['accuracy']:.2f}%")
             print(f"Test Loss Actions: {test_metrics['avg_loss_actions']:.4f} Test Accuracy Actions: {test_metrics['accuracy_actions']:.2f}%")
             print(f"Test Loss Rewards: {test_metrics['avg_loss_rewards']:.4f} Test Accuracy Rewards: {test_metrics['accuracy_rewards']:.2f}%")
+            print(f"Approx positive reward better than neutral: {test_metrics['approx_positive_rew_better_than_neutral']:.2f}%")
+            if 'approx_neutral_rew_better_than_negative' in test_metrics:
+                print(f"Approx neutral reward better than negative: {test_metrics['approx_neutral_rew_better_than_negative']:.2f}%")
+            if 'approx_positive_rew_better_than_negative' in test_metrics:
+                print(f"Approx positive reward better than negative: {test_metrics['approx_positive_rew_better_than_negative']:.2f}%")
 
         print('**************')
     
@@ -450,8 +460,25 @@ def main(args):
 
     train_model(model, train_loader, test_loader, criterion, optimizer, args.epochs, device, train_loader_non_zero_rewards=train_loader_non_zero_rewards)
 
-    # evaluate_model(model, train_loader, criterion, device, id="final_train")
-    # evaluate_model(model, test_loader, criterion, device, id="final_test")
+    # train_metrics = evaluate_model(model, train_loader, criterion, device, id="final_train")
+    # print(f"Train Loss: {train_metrics['avg_loss']:.4f} Train Accuracy: {train_metrics['accuracy']:.2f}%")
+    # print(f"Train Loss Actions: {train_metrics['avg_loss_actions']:.4f} Train Accuracy Actions: {train_metrics['accuracy_actions']:.2f}%")
+    # print(f"Train Loss Rewards: {train_metrics['avg_loss_rewards']:.4f} Train Accuracy Rewards: {train_metrics['accuracy_rewards']:.2f}%")
+    # print(f"Approx positive reward better than neutral: {train_metrics['approx_positive_rew_better_than_neutral']:.2f}%")
+    # if 'approx_neutral_rew_better_than_negative' in train_metrics:
+    #     print(f"Approx neutral reward better than negative: {train_metrics['approx_neutral_rew_better_than_negative']:.2f}%")
+    # if 'approx_positive_rew_better_than_negative' in train_metrics:
+    #     print(f"Approx positive reward better than negative: {train_metrics['approx_positive_rew_better_than_negative']:.2f}%")
+
+    # test_metrics = evaluate_model(model, test_loader, criterion, device, id="final_test")
+    # print(f"Test Loss: {test_metrics['avg_loss']:.4f} Test Accuracy: {test_metrics['accuracy']:.2f}%")
+    # print(f"Test Loss Actions: {test_metrics['avg_loss_actions']:.4f} Test Accuracy Actions: {test_metrics['accuracy_actions']:.2f}%")
+    # print(f"Test Loss Rewards: {test_metrics['avg_loss_rewards']:.4f} Test Accuracy Rewards: {test_metrics['accuracy_rewards']:.2f}%")
+    # print(f"Approx positive reward better than neutral: {test_metrics['approx_positive_rew_better_than_neutral']:.2f}%")
+    # if 'approx_neutral_rew_better_than_negative' in test_metrics:
+    #     print(f"Approx neutral reward better than negative: {test_metrics['approx_neutral_rew_better_than_negative']:.2f}%")
+    # if 'approx_positive_rew_better_than_negative' in test_metrics:
+    #     print(f"Approx positive reward better than negative: {test_metrics['approx_positive_rew_better_than_negative']:.2f}%")
 
     if args.write_new_dataset_dir is not None:
         write_new_dataset(train_df, test_df, model)
