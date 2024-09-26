@@ -71,10 +71,10 @@ class RewEndModel(nn.Module):
         logits_rew, logits_end, _ = self(obs, act, next_obs)
         logits_rew = logits_rew[mask]
         logits_end = logits_end[mask]
-        target_rew = rew[mask].sign().long().add(1)  # clipped to {-1, 0, 1}
+        target_rew = rew[mask]
         target_end = end[mask]
 
-        loss_rew = F.cross_entropy(logits_rew, target_rew)
+        loss_rew = F.kl_div(input=logits_rew, target=target_rew, log_target=True)
         loss_end = F.cross_entropy(logits_end, target_end)
         loss = loss_rew + loss_end
 
@@ -83,7 +83,6 @@ class RewEndModel(nn.Module):
             "loss_end": loss_end.detach(),
             "loss_total": loss.detach(),
             "confusion_matrix": {
-                "rew": multiclass_confusion_matrix(logits_rew, target_rew, num_classes=3),
                 "end": multiclass_confusion_matrix(logits_end, target_end, num_classes=2),
             },
         }
