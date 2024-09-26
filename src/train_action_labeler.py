@@ -20,6 +20,7 @@ import tqdm
 from collections import defaultdict
 from PIL import ImageDraw
 import gymnasium as gym
+import torch.nn.functional as F
 
 context_n_frames = 10
 assert context_n_frames == 10
@@ -116,7 +117,11 @@ def preprocess_data(df):
     return df
 
 class StateActionDataset(Dataset):
-    def __init__(self, df):
+    def __init__(self, df, only_non_zero_rewards=False):
+        if only_non_zero_rewards:
+            rewards = torch.stack(df.reward.tolist())
+            df = df[(rewards!=0).flatten().tolist()]
+
         self.df = df
 
     def __len__(self):
@@ -162,6 +167,10 @@ def evaluate_model(model, data_loader, criterion, device, id, take=None):
     total = 0
     ctr = 0
 
+    true_pos_reward_expected_reward = []
+    true_neutral_reward_expected_reward = []
+    true_neg_reward_expected_reward = []
+
     for it in tqdm.tqdm(data_loader):
         inputs = it['state']
         action_labels = it['action']
@@ -171,6 +180,15 @@ def evaluate_model(model, data_loader, criterion, device, id, take=None):
 
         inputs, action_labels, reward_labels = inputs.to(device), action_labels.to(device), reward_labels.to(device)
         outputs_actions, outputs_rewards = model(inputs)
+
+        outputs_rewards_probs = F.softmax(outputs_rewards, dim=1)
+        neg_reward_probs = outputs_rewards_probs[:, 0]
+        pos_reward_probs = outputs_rewards_probs[:, 2]
+
+        expected_reward = pos_reward_probs - neg_reward_probs
+        true_pos_reward_expected_reward.extend(expected_reward[reward_labels == 2].flatten().tolist())
+        true_neutral_reward_expected_reward.extend(expected_reward[reward_labels == 1].flatten().tolist())
+        true_neg_reward_expected_reward.extend(expected_reward[reward_labels == 0].flatten().tolist())
 
         loss_actions = criterion(outputs_actions, action_labels)
 
@@ -261,13 +279,50 @@ def evaluate_model(model, data_loader, criterion, device, id, take=None):
 
     model.train()
 
-    return (
-        avg_loss, accuracy, 
-        avg_loss_actions, accuracy_actions, 
-        avg_loss_rewards, accuracy_rewards
+    rv = dict(
+        avg_loss=avg_loss, accuracy=accuracy, 
+        avg_loss_actions=avg_loss_actions, accuracy_actions=accuracy_actions, 
+        avg_loss_rewards=avg_loss_rewards, accuracy_rewards=accuracy_rewards,
     )
 
-def train_model(model, train_loader, test_loader, criterion, optimizer, num_epochs, device):
+    do_box_plot = False
+
+    if do_box_plot:
+        data_lists = [true_pos_reward_expected_reward, true_neutral_reward_expected_reward]
+        labels = ['true_pos_reward_expected_reward', 'true_neutral_reward_expected_reward']
+        if len(true_neg_reward_expected_reward):
+            data_lists.append(true_neg_reward_expected_reward)
+            labels.append('true_neg_reward_expected_reward')
+        generate_box_plot(data_lists, labels, 'boxplot.png', title='Sample Box Plot')
+
+    # compare positive to neutral
+    sample_n = min(min(1000, len(true_pos_reward_expected_reward)), len(true_neutral_reward_expected_reward))
+    approx_positive_rew_better_than_neutral = np.mean(np.random.choice(true_pos_reward_expected_reward, sample_n) > np.random.choice(true_neutral_reward_expected_reward, sample_n))
+    rv['approx_positive_rew_better_than_neutral'] = approx_positive_rew_better_than_neutral
+
+    if len(true_neg_reward_expected_reward):
+        # compare neutral to negative
+        sample_n = min(min(1000, len(true_neutral_reward_expected_reward)), len(true_neg_reward_expected_reward))
+        approx_neutral_rew_better_than_negative = np.mean(np.random.choice(true_neutral_reward_expected_reward, sample_n) > np.random.choice(true_neg_reward_expected_reward, sample_n))
+        # compare positive to negative
+        sample_n = min(min(1000, len(true_pos_reward_expected_reward)), len(true_neg_reward_expected_reward))
+        approx_positive_rew_better_than_negative = np.mean(np.random.choice(true_pos_reward_expected_reward, sample_n) > np.random.choice(true_neg_reward_expected_reward, sample_n))
+
+        rv['approx_positive_rew_better_than_negative'] = approx_positive_rew_better_than_negative
+        rv['approx_neutral_rew_better_than_negative'] = approx_neutral_rew_better_than_negative
+
+    return rv
+
+def data_loader_loop(train_loader, train_loader_non_zero_rewards=None):
+    for it in train_loader:
+        yield it
+
+    if train_loader_non_zero_rewards is not None:
+        for _ in range(8):
+            for it in train_loader_non_zero_rewards:
+                yield it
+
+def train_model(model, train_loader, test_loader, criterion, optimizer, num_epochs, device, train_loader_non_zero_rewards=None):
     steps_per_epoch = len(train_loader)
 
     for epoch in range(num_epochs):
@@ -279,7 +334,11 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
 
         train_loss_ctr = 0
 
-        for step, it in enumerate(train_loader, 1):
+        total_pbar = len(train_loader)
+        if train_loader_non_zero_rewards is not None:
+            total_pbar += len(train_loader_non_zero_rewards) * 8
+
+        for step, it in tqdm.tqdm(enumerate(data_loader_loop(train_loader, train_loader_non_zero_rewards), 1), total=total_pbar):
             optimizer.zero_grad()
 
             inputs, actions, rewards = it['state'], it['action'], it['reward']
@@ -312,17 +371,17 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
         print(f'Avg Train Loss Rewards: {total_train_loss_rewards / train_loss_ctr:.4f} ')
 
         if (epoch+1) % args.eval_every_n_epochs == 0 or epoch == num_epochs - 1:
-            train_loss, train_accuracy, train_loss_actions, train_accuracy_actions, train_loss_rewards, train_accuracy_rewards = evaluate_model(model, train_loader, criterion, device, id=f"{epoch}_train")
+            train_metrics = evaluate_model(model, train_loader, criterion, device, id=f"{epoch}_train")
 
-            print(f"Train Loss: {train_loss:.4f} Train Accuracy: {train_accuracy:.2f}%")
-            print(f"Train Loss Actions: {train_loss_actions:.4f} Train Accuracy Actions: {train_accuracy_actions:.2f}%")
-            print(f"Train Loss Rewards: {train_loss_rewards:.4f} Train Accuracy Rewards: {train_accuracy_rewards:.2f}%")
+            print(f"Train Loss: {train_metrics['avg_loss']:.4f} Train Accuracy: {train_metrics['accuracy']:.2f}%")
+            print(f"Train Loss Actions: {train_metrics['avg_loss_actions']:.4f} Train Accuracy Actions: {train_metrics['accuracy_actions']:.2f}%")
+            print(f"Train Loss Rewards: {train_metrics['avg_loss_rewards']:.4f} Train Accuracy Rewards: {train_metrics['accuracy_rewards']:.2f}%")
 
-            test_loss, test_accuracy, test_loss_actions, test_accuracy_actions, test_loss_rewards, test_accuracy_rewards = evaluate_model(model, test_loader, criterion, device, id=f"{epoch}_test")
+            test_metrics = evaluate_model(model, test_loader, criterion, device, id=f"{epoch}_test")
 
-            print(f"Test Loss: {test_loss:.4f} Test Accuracy: {test_accuracy:.2f}%")
-            print(f"Test Loss Actions: {test_loss_actions:.4f} Test Accuracy Actions: {test_accuracy_actions:.2f}%")
-            print(f"Test Loss Rewards: {test_loss_rewards:.4f} Test Accuracy Rewards: {test_accuracy_rewards:.2f}%")
+            print(f"Test Loss: {test_metrics['avg_loss']:.4f} Test Accuracy: {test_metrics['accuracy']:.2f}%")
+            print(f"Test Loss Actions: {test_metrics['avg_loss_actions']:.4f} Test Accuracy Actions: {test_metrics['accuracy_actions']:.2f}%")
+            print(f"Test Loss Rewards: {test_metrics['avg_loss_rewards']:.4f} Test Accuracy Rewards: {test_metrics['accuracy_rewards']:.2f}%")
 
         print('**************')
     
@@ -379,6 +438,8 @@ def main(args):
     train_loader = DataLoader(train_dataset, num_workers=0, batch_size=args.batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, num_workers=0, batch_size=args.batch_size, shuffle=False)
 
+    train_loader_non_zero_rewards = None # DataLoader(StateActionDataset(train_df, only_non_zero_rewards=True), num_workers=0, batch_size=args.batch_size, shuffle=True)
+
     num_classes = df['action'].max() + 1
     # model = SimpleCNN(context_n_frames=context_n_frames, num_classes=num_classes).to(device).train()
     model = AnotherCNN(context_n_frames=context_n_frames, num_classes=num_classes, num_rewards=3).to(device).train()
@@ -387,7 +448,7 @@ def main(args):
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    train_model(model, train_loader, test_loader, criterion, optimizer, args.epochs, device)
+    train_model(model, train_loader, test_loader, criterion, optimizer, args.epochs, device, train_loader_non_zero_rewards=train_loader_non_zero_rewards)
 
     # evaluate_model(model, train_loader, criterion, device, id="final_train")
     # evaluate_model(model, test_loader, criterion, device, id="final_test")
@@ -531,6 +592,41 @@ def write_new_dataset(train_df, test_df, model):
 
     ds.is_static = True
     ds.save_to_default_path()
+
+def generate_box_plot(data_lists, labels, filename, title='Box Plot', xlabel='Categories', ylabel='Values'):
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    """
+    Generate a box plot from multiple lists of floats and save it to a file.
+    
+    :param data_lists: List of lists containing float values
+    :param labels: List of labels for each dataset
+    :param filename: Name of the file to save the box plot (include extension, e.g., 'boxplot.png')
+    :param title: Title of the box plot (default: 'Box Plot')
+    :param xlabel: Label for x-axis (default: 'Categories')
+    :param ylabel: Label for y-axis (default: 'Values')
+    """
+    plt.figure(figsize=(12, 7))
+    
+    # Create the box plot
+    bp = plt.boxplot(data_lists, labels=labels, patch_artist=True)
+    
+    # Customize the box plot colors
+    colors = plt.cm.Set3(np.linspace(0, 1, len(data_lists)))
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+    
+    # Add some random points to show the distribution
+    for i, data in enumerate(data_lists):
+        x = np.random.normal(i + 1, 0.04, len(data))
+        plt.scatter(x, data, alpha=0.3, s=5)
+    
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.savefig(filename)
+    plt.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train an image classifier for state-action prediction")

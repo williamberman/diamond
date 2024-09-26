@@ -193,7 +193,12 @@ class AnotherCNN(nn.Module):
                 # self.layer_norm1 = nn.LayerNorm(256)
                 # self.act = nn.SiLU()
 
-                self.fc = nn.Linear(dim, num_classes+num_rewards)
+                self.fc = nn.Linear(dim, num_classes+num_rewards, bias=True) 
+
+                # TODO - add a large bias to the no reward class?
+                # bias = torch.zeros(num_classes+num_rewards)
+                # bias[-2] = 10
+                # self.fc.bias.data = bias
 
             def forward(self, x):
                 x = self.layer_norm(x)
