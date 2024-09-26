@@ -460,7 +460,7 @@ def main(args):
 def write_new_dataset(train_df, test_df, model):
     model.eval()
 
-    ds = Dataset(args.write_new_dataset_dir)
+    ds = Dataset(args.write_new_dataset_dir, disable_rew_counter=True)
 
     df = pd.concat([train_df, test_df], ignore_index=True)
 
@@ -470,8 +470,6 @@ def write_new_dataset(train_df, test_df, model):
     episode_data = {}
 
     num_right = 0
-    num_right_actions = 0
-    num_right_rewards = 0
 
     for dir in df.dir.unique():
         dir_df = df[df.dir == dir]
@@ -503,25 +501,22 @@ def write_new_dataset(train_df, test_df, model):
                     act_logits, rew_logits = model(model_input)
 
                     act = act_logits.argmax().item()
-                    rew = rew_logits.argmax().item() - 1
-                    assert rew in [-1, 0, 1]
-
-                    target_rew = row['reward'].sign().item()
-                    assert target_rew in [-1, 0, 1]
+                    rew = rew_logits[0]
 
                     if act == row['action']:
-                        num_right_actions += 1
-
-                    if rew == target_rew:
-                        num_right_rewards += 1
-
-                    if act == row['action'] and rew == target_rew:
                         num_right += 1
+                else:
+                    # set the logit for the actual reward to a large number
+                    rew_logits = torch.zeros(3, dtype=torch.float32, device=args.gpu)
+                    clipped_reward = row['reward'].sign().long().item() + 1
+                    assert clipped_reward in [0, 1, 2]
+                    rew_logits[clipped_reward] = 1000
+                    rew = rew_logits
 
                 episodes[f"{dir}_{episode_id}"].append((obs, act, rew, end, trunc))
 
                 pbar.update(1)
-                pbar.set_postfix(num_right=num_right, num_right_actions=num_right_actions, num_right_rewards=num_right_rewards)
+                pbar.set_postfix(num_right=num_right)
 
     pbar.close()
 
@@ -559,7 +554,7 @@ def write_new_dataset(train_df, test_df, model):
 
         assert obs.ndim == 4
         assert act.ndim == 1
-        assert rew.ndim == 1
+        assert rew.ndim == 2
         assert end.ndim == 1
         assert trunc.ndim == 1
 
@@ -583,8 +578,6 @@ def write_new_dataset(train_df, test_df, model):
     pbar.close()
 
     print(f"Num right: {num_right/len(test_df):.2f}%")
-    print(f"Num right actions: {num_right_actions/len(test_df):.2f}%")
-    print(f"Num right rewards: {num_right_rewards/len(test_df):.2f}%")
 
     print(f"len(df): {len(df)} len(ds): {len(ds)}")
 

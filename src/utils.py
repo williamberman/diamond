@@ -71,6 +71,8 @@ class StateDictMixin:
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         if not hasattr(self, "_all_fields"):
             self._init_fields()
+        if 'disable_rew_counter' not in state_dict and hasattr(self, 'disable_rew_counter'):
+            state_dict['disable_rew_counter'] = False
         assert set(list(state_dict.keys())) == self._all_fields
         for k, v in state_dict.items():
             self._set_field(k, v)

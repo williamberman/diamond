@@ -21,6 +21,7 @@ class Dataset(StateDictMixin, torch.utils.data.Dataset):
         cache_in_ram: bool = False,
         use_manager: bool = False,
         save_on_disk: bool = True,
+        disable_rew_counter=False
     ) -> None:
         super().__init__()
 
@@ -32,6 +33,7 @@ class Dataset(StateDictMixin, torch.utils.data.Dataset):
         self.lengths = None
         self.counter_rew = None
         self.counter_end = None
+        self.disable_rew_counter = disable_rew_counter
 
         self._directory = Path(directory).expanduser()
         self._name = name if name is not None else self._directory.stem
@@ -57,6 +59,8 @@ class Dataset(StateDictMixin, torch.utils.data.Dataset):
 
     @property
     def counts_rew(self) -> List[int]:
+        if self.disable_rew_counter:
+            assert False
         return [self.counter_rew[r] for r in [-1, 0, 1]]
 
     @property
@@ -68,7 +72,7 @@ class Dataset(StateDictMixin, torch.utils.data.Dataset):
         self.num_steps = 0
         self.start_idx = np.array([], dtype=np.int64)
         self.lengths = np.array([], dtype=np.int64)
-        self.counter_rew = Counter()
+        self.counter_rew = Counter() if not self.disable_rew_counter else None
         self.counter_end = Counter()
         self._cache.clear()
 
@@ -105,11 +109,13 @@ class Dataset(StateDictMixin, torch.utils.data.Dataset):
             self.lengths[episode_id] = len(episode)
             self.start_idx[episode_id + 1 :] += incr_num_steps
             self.num_steps += incr_num_steps
-            self.counter_rew.subtract(old_episode.rew.sign().tolist())
+            if not self.disable_rew_counter:
+                self.counter_rew.subtract(old_episode.rew.sign().tolist())
             self.counter_end.subtract(old_episode.end.tolist())
 
-        self.counter_rew.update(episode.rew.sign().tolist())
-        self.counter_end.update(episode.end.tolist())
+        if not self.disable_rew_counter:
+            self.counter_rew.update(episode.rew.sign().tolist())
+            self.counter_end.update(episode.end.tolist())
 
         if self._save_on_disk:
             episode.save(self._get_episode_path(episode_id))
