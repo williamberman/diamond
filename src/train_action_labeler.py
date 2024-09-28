@@ -298,7 +298,7 @@ def evaluate_model(model, data_loader, criterion, device, id, take=None):
     # compare positive to neutral
     sample_n = min(min(1000, len(true_pos_reward_expected_reward)), len(true_neutral_reward_expected_reward))
     approx_positive_rew_better_than_neutral = np.mean(np.random.choice(true_pos_reward_expected_reward, sample_n) > np.random.choice(true_neutral_reward_expected_reward, sample_n))
-    rv['approx_positive_rew_better_than_neutral'] = approx_positive_rew_better_than_neutral
+    rv['approx_positive_rew_better_than_neutral'] = approx_positive_rew_better_than_neutral * 100
 
     if len(true_neg_reward_expected_reward):
         # compare neutral to negative
@@ -308,8 +308,8 @@ def evaluate_model(model, data_loader, criterion, device, id, take=None):
         sample_n = min(min(1000, len(true_pos_reward_expected_reward)), len(true_neg_reward_expected_reward))
         approx_positive_rew_better_than_negative = np.mean(np.random.choice(true_pos_reward_expected_reward, sample_n) > np.random.choice(true_neg_reward_expected_reward, sample_n))
 
-        rv['approx_positive_rew_better_than_negative'] = approx_positive_rew_better_than_negative
-        rv['approx_neutral_rew_better_than_negative'] = approx_neutral_rew_better_than_negative
+        rv['approx_positive_rew_better_than_negative'] = approx_positive_rew_better_than_negative * 100
+        rv['approx_neutral_rew_better_than_negative'] = approx_neutral_rew_better_than_negative * 100
 
     return rv
 
