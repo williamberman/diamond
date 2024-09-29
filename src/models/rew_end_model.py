@@ -74,7 +74,9 @@ class RewEndModel(nn.Module):
         target_rew = rew[mask]
         target_end = end[mask]
 
-        loss_rew = F.kl_div(input=logits_rew, target=target_rew, log_target=True)
+        logits_rew = logits_rew.softmax(dim=-1).clamp(min=1e-9).log()
+        target_rew = target_rew.softmax(dim=-1).clamp(min=1e-9).log()
+        loss_rew = F.kl_div(input=logits_rew, target=target_rew, log_target=True, reduction='batchmean')
         loss_end = F.cross_entropy(logits_end, target_end)
         loss = loss_rew + loss_end
 

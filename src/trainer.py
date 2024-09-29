@@ -392,6 +392,9 @@ class Trainer(StateDictMixin):
             loss, metrics = model.compute_loss(batch) if batch is not None else model.compute_loss()
             loss.backward()
 
+            if loss.isnan() or loss.isinf():
+                assert False, "fuk dude"
+
             num_batch = self.num_batch_train.get(name)
             metrics[f"num_batch_train_{name}"] = num_batch
             self.num_batch_train.set(name, num_batch + 1)
@@ -400,6 +403,7 @@ class Trainer(StateDictMixin):
                 if cfg.max_grad_norm is not None:
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
                     metrics["grad_norm_before_clip"] = grad_norm
+                    print(f"grad_norm: {grad_norm} loss: {loss.item()}")
 
                 opt.step()
                 opt.zero_grad()
