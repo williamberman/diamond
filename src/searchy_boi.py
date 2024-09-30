@@ -239,35 +239,6 @@ def choose_action(obs, actions, ctr):
             all_obs[tuple(init_act)].append(obs___)
             all_actions[tuple(init_act)].append(actions___)
 
-    # avg_rews = {act: sum(rew)/len(rew) for act, rew in all_rew.items()}
-    avg_rews = {act: max(rew) for act, rew in all_rew.items()}
-    ends = {act: any(end) for act, end in all_end.items()}
-
-    best_rew = 0
-    best_action = None
-
-    for action in avg_rews.keys():
-        avg_rew = avg_rews[action]
-        end = ends[action]
-
-        if avg_rew > best_rew and not end:
-            best_rew = avg_rew
-            best_action = action
-
-    suffix = f"_best"
-    if best_action is None:
-        best_action = random.choice(list(avg_rews.keys()))
-        suffix = f"_random"
-
-    # if device == 0:
-        # print(f"avg_rews: {avg_rews}, ends: {ends}, best_action: {best_action}, best_rew: {best_rew}")
-        # print(f"best_action: {best_action}, best_rew: {best_rew}")
-
-    print(f"device {device}: best_action: {best_action}, best_rew: {best_rew}")
-
-    for i in range(n_samples):
-        save(all_obs[best_action][i][max(input_seq_len-3, 0):], f"pred_{ctr}_{device}_{i}_{best_rew:.4f}_{best_action}{suffix}")
-
     return choose_action_orig(all_obs, all_rew, all_end, input_seq_len, ctr)
 
 def choose_action_orig(all_obs, all_rew, all_end, input_seq_len, ctr):
