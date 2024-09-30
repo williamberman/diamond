@@ -70,32 +70,7 @@ def main(cfg_: DictConfig):
             dist.scatter(obs, obs_send, 0)
             dist.scatter(actions, actions_send, 0)
 
-            action, best_rew = choose_action(obs, actions, ctr)
-            best_rew = best_rew.item()
-
-            # gather best_rew
-            best_rew = torch.tensor([best_rew], device=device)
-            if device == 0:
-                best_rew_target = [torch.zeros_like(best_rew) for _ in range(dist.get_world_size())]
-            else:
-                best_rew_target = None
-            dist.gather(best_rew, best_rew_target, 0)
-
-            # gather action
-            action = torch.tensor([action], device=device)
-            if device == 0:
-                action_target = [torch.zeros_like(action) for _ in range(dist.get_world_size())]
-            else:
-                action_target = None
-            dist.gather(action, action_target, 0)
-
-            if device == 0:
-                best_rew = torch.concat(best_rew_target, dim=0).tolist()
-                action = torch.concat(action_target, dim=0).tolist()
-                action_rew = zip(action, best_rew)
-                action_rew = sorted(action_rew, key=lambda x: x[1], reverse=True)
-                print(f"device {device}: chose best action {action_rew[0][0]} with rew {action_rew[0][1]}")
-                action = action_rew[0][0]
+            action = choose_action(obs, actions, ctr)
 
         if device == 0:
             end = env_loop_.step2(action)
@@ -183,7 +158,9 @@ class env_loop:
         return end or trunc
 
 # save_prefix = "/workspace/run_see_if_access_to_fire_helps/"
-save_prefix = "/workspace/running_with_theirs_2/"
+# save_prefix = "/workspace/running_with_theirs_2/"
+# save_prefix = "/workspace/running_with_theirs_reward_averaging/"
+save_prefix = "/workspace/running_with_theirs_test_refactor/"
 if device == 0:
     os.makedirs(save_prefix, exist_ok=True)
 
@@ -291,7 +268,68 @@ def choose_action(obs, actions, ctr):
     for i in range(n_samples):
         save(all_obs[best_action][i][max(input_seq_len-3, 0):], f"pred_{ctr}_{device}_{i}_{best_rew:.4f}_{best_action}{suffix}")
 
-    return best_action[0], best_rew
+    return choose_action_orig(all_obs, all_rew, all_end, input_seq_len, ctr)
+
+def choose_action_orig(all_obs, all_rew, all_end, input_seq_len, ctr):
+    n_samples = len(next(iter(all_obs.values())))
+
+    # avg_rews = {act: sum(rew)/len(rew) for act, rew in all_rew.items()}
+    avg_rews = {act: max(rew) for act, rew in all_rew.items()}
+    ends = {act: any(end) for act, end in all_end.items()}
+
+    best_rew = 0
+    best_action = None
+
+    for action in avg_rews.keys():
+        avg_rew = avg_rews[action]
+        end = ends[action]
+
+        if avg_rew > best_rew and not end:
+            best_rew = avg_rew
+            best_action = action
+
+    suffix = f"_best"
+    if best_action is None:
+        best_action = random.choice(list(avg_rews.keys()))
+        suffix = f"_random"
+
+    # if device == 0:
+        # print(f"avg_rews: {avg_rews}, ends: {ends}, best_action: {best_action}, best_rew: {best_rew}")
+        # print(f"best_action: {best_action}, best_rew: {best_rew}")
+
+    print(f"device {device}: best_action: {best_action}, best_rew: {best_rew}")
+
+    for i in range(n_samples):
+        save(all_obs[best_action][i][max(input_seq_len-3, 0):], f"pred_{ctr}_{device}_{i}_{best_rew:.4f}_{best_action}{suffix}")
+
+    action = best_action[0]
+
+    best_rew = best_rew.item()
+
+    # gather best_rew
+    best_rew = torch.tensor([best_rew], device=device)
+    if device == 0:
+        best_rew_target = [torch.zeros_like(best_rew) for _ in range(dist.get_world_size())]
+    else:
+        best_rew_target = None
+    dist.gather(best_rew, best_rew_target, 0)
+
+    # gather action
+    action = torch.tensor([action], device=device)
+    if device == 0:
+        action_target = [torch.zeros_like(action) for _ in range(dist.get_world_size())]
+    else:
+        action_target = None
+    dist.gather(action, action_target, 0)
+
+    if device == 0:
+        best_rew = torch.concat(best_rew_target, dim=0).tolist()
+        action = torch.concat(action_target, dim=0).tolist()
+        action_rew = zip(action, best_rew)
+        action_rew = sorted(action_rew, key=lambda x: x[1], reverse=True)
+        print(f"device {device}: chose best action {action_rew[0][0]} with rew {action_rew[0][1]}")
+        action = action_rew[0][0]
+        return action
 
 def rollout_trajectory(obs, actions, rollout):
     assert obs.ndim == 5
