@@ -183,7 +183,8 @@ class env_loop:
 # save_prefix = "/workspace/run_see_if_access_to_fire_helps/"
 # save_prefix = "/workspace/running_with_theirs_2/"
 # save_prefix = "/workspace/running_with_theirs_reward_averaging/"
-save_prefix = "/workspace/running_with_theirs_test_avg/"
+# save_prefix = "/workspace/running_with_theirs_test_avg_no_mc/"
+save_prefix = "/workspace/running_with_theirs_test_avg_no_zero/"
 if device == 0:
     os.makedirs(save_prefix, exist_ok=True)
 
@@ -200,8 +201,8 @@ def save(obs, idx):
         print("saved")
 
 # available_sample_actions = [0, 2, 3]
-# available_sample_actions = [0, 1, 2, 3]
-available_sample_actions = [1, 2, 3]
+available_sample_actions = [0, 1, 2, 3]
+# available_sample_actions = [1, 2, 3]
 # available_sample_actions = [2, 3]
 
 def init_search_actions(n):
@@ -220,6 +221,15 @@ def init_search_actions(n):
 
     return rv
 
+# init_search_actions_ = init_search_actions(10) # when 2 options
+# init_search_actions_ = init_search_actions(7)
+# init_search_actions_ = init_search_actions(8) # when 3 options
+# init_search_actions_ = init_search_actions(5)
+# init_search_actions_ = init_search_actions(15)
+# init_search_actions_ = init_search_actions(5)
+# init_search_actions_ = init_search_actions(10)
+init_search_actions_ = init_search_actions(8)
+
 def choose_action(obs, actions, ctr):
     assert obs.ndim == 5
     assert actions.ndim == 2
@@ -235,28 +245,20 @@ def choose_action(obs, actions, ctr):
     all_obs = defaultdict(list)
     all_actions = defaultdict(list)
 
-    # init_search_actions_ = init_search_actions(10) # when 2 options
-    # init_search_actions_ = init_search_actions(7)
-    # init_search_actions_ = init_search_actions(8) # when 3 options
-    # init_search_actions_ = init_search_actions(5)
-    # init_search_actions_ = init_search_actions(15)
-    # init_search_actions_ = init_search_actions(5)
-    init_search_actions_ = init_search_actions(10)
-
-    init_search_actions_ = [x for i, x in enumerate(init_search_actions_) if i % dist.get_world_size() == device]
+    init_search_actions__ = [x for i, x in enumerate(init_search_actions_) if i % dist.get_world_size() == device]
 
     n_samples = 1
     # n_samples = 5
 
-    mc_traj_len = 20
+    mc_traj_len = 0 # 20
 
-    outter_loop = [x for x in range(0, len(init_search_actions_), 1024)]
+    outter_loop = [x for x in range(0, len(init_search_actions__), 1024)]
 
-    pbar = tqdm.tqdm(total=len(outter_loop)*(len(init_search_actions_[0])+(n_samples*mc_traj_len)), desc="initial rollout", disable=device != 0)
+    pbar = tqdm.tqdm(total=len(outter_loop)*(len(init_search_actions__[0])+(n_samples*mc_traj_len)), desc="initial rollout", disable=device != 0)
 
     for start_idx in outter_loop:
-        end_idx = min(start_idx + 1024, len(init_search_actions_))
-        init_search_actions_batch = init_search_actions_[start_idx:end_idx]
+        end_idx = min(start_idx + 1024, len(init_search_actions__))
+        init_search_actions_batch = init_search_actions__[start_idx:end_idx]
 
         # if device == 0:
         #     print("doing initial rollout")
@@ -265,12 +267,14 @@ def choose_action(obs, actions, ctr):
         #     print("done initial rollout")
 
         for _ in range(n_samples):
-            # obs__, actions__, rew_, end_ = sample_trajectory(obs_, actions_, 15) # when initial search depth 10
-            obs__, actions__, rew_, end_ = sample_trajectory(obs_, actions_, mc_traj_len, pbar)
-            # obs__, actions__, rew_, end_ = sample_trajectory(obs_, actions_, 10)
-
-            rew_ = torch.cat([rew, rew_], dim=1)
-            end_ = torch.cat([end, end_], dim=1)
+            if mc_traj_len == 0:
+                obs__, actions__, rew_, end_ = obs_, actions_, rew, end
+            else:
+                # obs__, actions__, rew_, end_ = sample_trajectory(obs_, actions_, 15) # when initial search depth 10
+                obs__, actions__, rew_, end_ = sample_trajectory(obs_, actions_, mc_traj_len, pbar)
+                # obs__, actions__, rew_, end_ = sample_trajectory(obs_, actions_, 10)
+                rew_ = torch.cat([rew, rew_], dim=1)
+                end_ = torch.cat([end, end_], dim=1)
 
             # rew_ = rew_.sum(dim=-1)
             rew_ = rew_.max(dim=-1).values
@@ -342,13 +346,14 @@ def choose_action_take_avg(all_rew, ctr):
         plt.savefig(os.path.join(save_prefix, f"obs_{ctr}.png"))
         plt.close()
 
-        skip_count = 10
-        for act in available_sample_actions:
-            if avg_rews[act].item() != 1.0:
-                skip_count = 0
+        skip_count = 0
+        # skip_count = 10
+        # for act in available_sample_actions:
+        #     if avg_rews[act].item() < 0.0: # == 1.0 
+        #         skip_count = 0
 
-        if skip_count > 0:
-            print(f"All scores are 1.0! skipping for {skip_count} steps")
+        # if skip_count > 0:
+        #     print(f"All scores are 1.0! skipping for {skip_count} steps")
 
         return action, skip_count
 
