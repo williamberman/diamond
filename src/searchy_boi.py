@@ -8,13 +8,13 @@ import random
 from PIL import Image
 import imageio
 from models.diffusion import DiffusionSampler
-from collections import defaultdict
 import torch.distributed as dist
 import os
 import time
 import gc
-import math
 import matplotlib.pyplot as plt
+import itertools
+import tqdm
 
 OmegaConf.register_new_resolver("eval", eval)
 
@@ -79,9 +79,8 @@ def main(cfg_: DictConfig):
             dist.scatter(obs, obs_send, 0)
             dist.scatter(actions, actions_send, 0)
 
-            choose_action_out = choose_action(obs, actions, ctr)
-            if device == 0:
-                action, skip_count = choose_action_out
+            action = choose_action(obs, actions, ctr=ctr)
+            skip_count = 0
 
         if device == 0:
             end = env_loop_.step2(action)
@@ -121,10 +120,10 @@ def init_global_state():
 
     num_steps_conditioning = agent.denoiser.inner_model.cfg.num_steps_conditioning
 
-    denoiser = torch.compile(agent.denoiser, mode="reduce-overhead")
-    rew_end_model = torch.compile(agent.rew_end_model, mode="reduce-overhead")
-    # denoiser = agent.denoiser
-    # rew_end_model = agent.rew_end_model
+    # denoiser = torch.compile(agent.denoiser, mode="reduce-overhead")
+    # rew_end_model = torch.compile(agent.rew_end_model, mode="reduce-overhead")
+    denoiser = agent.denoiser
+    rew_end_model = agent.rew_end_model
 
     sampler = DiffusionSampler(denoiser, cfg.world_model_env.diffusion_sampler)
 
@@ -203,109 +202,44 @@ def save(obs, idx):
 
 available_sample_actions = [0, 1, 2, 3]
 
+avg_rews_dbg = {k: [] for k in available_sample_actions}
 
-def choose_action(obs, actions, ctr):
-    assert obs.ndim == 5
-    assert actions.ndim == 2
-    assert obs.shape[1] == actions.shape[1] + 1
+def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048):
+    assert prefix_obs.ndim == 5
+    assert prefix_actions.ndim == 2
+    assert prefix_obs.shape[1] == prefix_actions.shape[1] + 1
 
-    if obs.shape[1] < num_steps_conditioning:
+    if prefix_obs.shape[1] < num_steps_conditioning:
         return random.randint(0, num_actions - 1)
 
-    actions, rew, end = rollout_to_depth(obs[:, -(num_steps_conditioning):], actions[:, -(num_steps_conditioning-1):], 9)
+    assert prefix_obs.shape[1] >= num_steps_conditioning
 
-    rew = rew.max(dim=-1).values
-    end = end.any(dim=-1)
-    print(f"{device}: num end: {end.sum().item()}/{end.shape[0]}")
-    rew = torch.where(end, torch.tensor([-1.0], device=device), rew)
+    prefix_obs = prefix_obs.squeeze(0)
+    prefix_actions = prefix_actions.squeeze(0)
 
-    all_rew = defaultdict(list)
+    paths = {}
+    for idx in range(prefix_obs.shape[0]):
+        key = tuple(prefix_actions[:idx].cpu().tolist()) # index action up to but not including current idx
+        paths[key] = {'obs': prefix_obs[idx], 'rew': None, 'end': None}
 
-    for action, rew in zip(actions, rew):
-        all_rew[tuple(action)].append(rew)
-
-    return choose_action_take_avg(all_rew, ctr)
-
-avg_rews_dbg = {0: [], 1: [], 2: [], 3: []}
-
-def choose_action_take_avg(all_rew, ctr):
-    sum_rews = torch.zeros((max(available_sample_actions)+1,), device=device, dtype=torch.float32)
-    counts = torch.zeros((max(available_sample_actions)+1,), device=device, dtype=torch.float32)
-
-    for idx in range(len(available_sample_actions)):
-        if idx not in available_sample_actions:
-            sum_rews[idx] = float("-inf")
-
-    for actions, rews in all_rew.items():
-        for rew in rews:
-            sum_rews[actions[0]] += rew
-            counts[actions[0]] += 1
-
-    # gather sum_rews and counts to device 0
-    if device == 0:
-        sum_rews_target = [torch.zeros_like(sum_rews) for _ in range(dist.get_world_size())]
-        counts_target = [torch.zeros_like(counts) for _ in range(dist.get_world_size())]
-    else:
-        sum_rews_target = None
-        counts_target = None
-
-    dist.gather(sum_rews, sum_rews_target, 0)
-    dist.gather(counts, counts_target, 0)
-
-    if device == 0:
-        sum_rews = torch.stack(sum_rews_target, dim=1).sum(dim=1)
-        counts = torch.stack(counts_target, dim=1).sum(dim=1)
-        avg_rews = sum_rews / counts
-        action = avg_rews.argmax().item()
-        rew = avg_rews[action].item()
-
-        print_str = ", ".join(f"{count} {rew:.4f} {avg_rew:.4f}" for rew, count, avg_rew in zip(sum_rews, counts, avg_rews))
-        print(print_str)
-        print(f"device {device}: chose best action {action} with avg_rew {rew}")
-        
-        assert not math.isinf(rew)
-        assert not math.isnan(rew)
-
-        for act in available_sample_actions:
-            it = avg_rews[act].item()
-            if math.isinf(it):
-                it = 0
-            avg_rews_dbg[act].append(it)
-
-        # write out line graph of each avg_rews_dbg[i] to file
-        plt.figure()
-        for act, rew in avg_rews_dbg.items():
-            plt.plot(rew, label=f"action {act}")
-        plt.legend()
-        plt.savefig(os.path.join(save_prefix, f"obs_{ctr}.png"))
-        plt.close()
-
-        skip_count = 0
-        # skip_count = 10
-        # for act in available_sample_actions:
-        #     if avg_rews[act].item() < 0.0: # == 1.0 
-        #         skip_count = 0
-
-        # if skip_count > 0:
-        #     print(f"All scores are 1.0! skipping for {skip_count} steps")
-
-        return action, skip_count
-
-
-def rollout_to_depth(obs, actions, depth):
     scattered = False
-
-    rew = torch.tensor([[]], device=device, dtype=torch.float32) 
-    end = torch.tensor([[]], device=device, dtype=torch.long) 
 
     for depth_idx in range(depth):
         if device == 0:
             print(f"rollout_to_depth {depth_idx+1}/{depth}")
 
         if device == 0:
-            should_scatter = torch.tensor([not scattered and obs.shape[0] >= 8], device=device)
+            if scattered:
+                should_scatter = False
+            else:
+                max_path_len = max([len(x) for x in paths.keys()])
+                num_at_max_path_len = len([x for x in paths.keys() if len(x) == max_path_len])
+                should_scatter = num_at_max_path_len >= dist.get_world_size()
+
+            should_scatter = torch.tensor([should_scatter], device=device)
         else:
             should_scatter = torch.tensor([False], device=device)
+
         dist.broadcast(should_scatter, 0)
 
         if should_scatter.item():
@@ -314,167 +248,132 @@ def rollout_to_depth(obs, actions, depth):
 
             scattered = True
 
-            # scatter obs, actions, rew, and end
-            if device == 0:
-                # assert obs.shape[0] == 16 and dist.get_world_size() == 8, "lul"
+            # each device should get each path less than the max path length. 
+            # paths at max path length will be split across devices
+            paths_ = [paths] if device == 0 else [None]
+            dist.broadcast_object_list(paths_, 0)
+            paths = paths_[0]
 
-                obs_scatter = list(obs.chunk(dist.get_world_size(), dim=0))
-                actions_scatter = list(actions.chunk(dist.get_world_size(), dim=0))
-                rew_scatter = list(rew.chunk(dist.get_world_size(), dim=0))
-                end_scatter = list(end.chunk(dist.get_world_size(), dim=0))
+            max_path_len = max([len(x) for x in paths.keys()])
 
-                assert all([x.shape[0] == 2 for x in obs_scatter])
-                assert all([x.shape[0] == 2 for x in actions_scatter])
-                assert all([x.shape[0] == 2 for x in rew_scatter])
-                assert all([x.shape[0] == 2 for x in end_scatter])
-            else:
-                obs_scatter = None
-                actions_scatter = None
-                rew_scatter = None
-                end_scatter = None
+            paths_not_at_max_len = [x for x in paths.keys() if len(x) < max_path_len]
 
-            obs_seq = obs.shape[1]
-            if device != 0:
-                obs_seq += depth_idx
+            paths_at_max_len = sorted([x for x in paths.keys() if len(x) == max_path_len])
+            paths_at_max_len = [x for i, x in enumerate(paths_at_max_len) if i % dist.get_world_size() == device]
 
-            actions_seq = actions.shape[1]
-            if device != 0:
-                actions_seq += depth_idx
+            paths = {k: paths[k] for k in itertools.chain(paths_not_at_max_len, paths_at_max_len)}
 
-            rew_seq = rew.shape[1]
-            if device != 0:
-                rew_seq += depth_idx
-
-            end_seq = end.shape[1]
-            if device != 0:
-                end_seq += depth_idx
-
-            obs = torch.zeros((2, obs_seq, obs.shape[2], obs.shape[3], obs.shape[4]), device=device, dtype=obs.dtype)
-            actions = torch.zeros((2, actions_seq), device=device, dtype=actions.dtype)
-            rew = torch.zeros((2, rew_seq), device=device, dtype=rew.dtype)
-            end = torch.zeros((2, end_seq), device=device, dtype=end.dtype)
-
-            dist.scatter(obs, obs_scatter, 0)
-            dist.scatter(actions, actions_scatter, 0)
-            dist.scatter(rew, rew_scatter, 0)
-            dist.scatter(end, end_scatter, 0)
-
-            if device == 0:
-                del obs_scatter, actions_scatter, rew_scatter, end_scatter
-
-            gc.collect()
-            torch.cuda.empty_cache()
+            for k in paths.keys():
+                paths[k]['obs'] = paths[k]['obs'].to(device)
+                if paths[k]['rew'] is not None:
+                    paths[k]['rew'] = paths[k]['rew'].to(device)
+                if paths[k]['end'] is not None:
+                    paths[k]['end'] = paths[k]['end'].to(device)
 
         if device == 0 or scattered:
-            rollout = [[act] for act in available_sample_actions for _ in range(obs.shape[0])]
-            obs, actions, rew, end = rollout_trajectory(obs, actions, rollout, None, rew, end)
+            max_path_len = max([len(x) for x in paths.keys()])
 
-    assert scattered
+            paths_to_step = [] 
+            for act in available_sample_actions:
+                for path in paths.keys():
+                    if len(path) == max_path_len:
+                        paths_to_step.append(list(path) + [act])
 
-    actions = actions[:, -(rew.shape[1]):]
-    assert actions.shape == rew.shape
-    assert rew.shape == end.shape
+            for start_idx in tqdm.tqdm(range(0, len(paths_to_step), max_batch_size), disable=device != 0):
+                end_idx = min(start_idx + max_batch_size, len(paths_to_step))
+                paths_to_step_batch = paths_to_step[start_idx:end_idx]
 
-    return actions, rew, end
+                obs_batch = []
+                actions_batch = []
 
-def rollout_trajectory(obs, actions, rollout, pbar, rew=None, end=None):
-    assert obs.ndim == 5
-    assert actions.ndim == 2
-    assert obs.shape[1] == actions.shape[1] + 1
-    assert all([len(rollout[0]) == len(x) for x in rollout])
+                for path in paths_to_step_batch:
+                    obs_batch.append([])
+                    actions_batch.append(torch.tensor(path[-num_steps_conditioning:], device=device, dtype=torch.long))
 
-    assert len(rollout) % actions.shape[0] == 0
+                    for idx in range(num_steps_conditioning):
+                        path_ = tuple(path[:-num_steps_conditioning+idx])
+                        obs_batch[-1].append(paths[path_]['obs'])
 
-    repeat_by = len(rollout) // actions.shape[0]
+                actions_batch = torch.stack(actions_batch).contiguous()
+                obs_batch = torch.stack([torch.stack(x) for x in obs_batch]).contiguous()
 
-    obs = obs.repeat((repeat_by, 1, 1, 1, 1))
-    actions = actions.repeat(repeat_by, 1) 
-    if rew is not None:
-        rew = rew.repeat(repeat_by, 1)
-    if end is not None:
-        end = end.repeat(repeat_by, 1)
+                assert obs_batch.shape[:2] == (end_idx-start_idx, num_steps_conditioning)
+                assert actions_batch.shape[:2] == (end_idx-start_idx, num_steps_conditioning)
 
-    assert obs.shape[0] == actions.shape[0]
-    assert len(rollout) == obs.shape[0]
-    assert rew is None or rew.shape[0] == actions.shape[0]
-    assert end is None or end.shape[0] == actions.shape[0]
+                next_obs_batch = sampler.sample_next_obs(obs_batch, actions_batch)[0]
+                next_obs_batch = torch.cat([obs_batch[:, 1:], next_obs_batch.unsqueeze(1)], dim=1)
+                rew_batch, end_batch, _ = rew_end_model(obs_batch, actions_batch, next_obs_batch)
 
-    chunk_size = 1024
-    chunks = range(0, obs.shape[0], chunk_size)
+                probs = rew_batch[:, -1, :].softmax(dim=-1)
+                pos_probs = probs[:, 2]
+                neg_probs = probs[:, 0]
+                rew_batch = pos_probs - neg_probs
+                end_batch = end_batch[:, -1, :].argmax(dim=-1)
+
+                for path, obs, rew, end in zip(paths_to_step_batch, next_obs_batch, rew_batch, end_batch):
+                    paths[tuple(path)] = {'obs': obs[-1], 'rew': rew, 'end': end}
+
+    max_path_len = max([len(x) for x in paths.keys()])
+    final_paths = {k: paths[k] for k in paths.keys() if len(k) == max_path_len}
+
+    results_rew = {x: [] for x in available_sample_actions}
+    results_end = {x: [] for x in available_sample_actions}
+
+    # for each final path, compute the reward and end
+    for path in final_paths.keys():
+        path = list(path)
+        first_action = path[prefix_obs.shape[0]-1] # TODO - something like this, what is the correct index
+
+        rew = -float("inf")
+        end = False
+
+        while True:
+            rew_ = paths[tuple(path)]['rew']
+            end_ = paths[tuple(path)]['end']
+
+            if rew_ is None or end_ is None:
+                break
+
+            rew = max(rew, rew_.item())
+            end = end or end_.item()
+
+            path.pop()
+
+        if end:
+            rew = -1
+
+        results_rew[first_action].append(rew)
+        results_end[first_action].append(end)
 
     if device == 0:
-        print(f"breaking rollout_trajectory of {obs.shape[0]} into {len(chunks)} chunks")
+        all_results_rew = [None for _ in range(dist.get_world_size())]
+    else:
+        all_results_rew = None
 
-    rv_obs = torch.empty((obs.shape[0], obs.shape[1]+len(rollout[0]), obs.shape[2], obs.shape[3], obs.shape[4]), device=device, dtype=obs.dtype)
-    rv_actions = torch.empty((actions.shape[0], actions.shape[1]+len(rollout[0])), device=device, dtype=actions.dtype)
-    rv_rew = torch.empty((rew.shape[0], rew.shape[1]+len(rollout[0])), device=device, dtype=rew.dtype)
-    rv_end = torch.empty((end.shape[0], end.shape[1]+len(rollout[0])), device=device, dtype=end.dtype)
+    dist.gather_object(results_rew, all_results_rew)
 
-    for start_idx in chunks:
-        end_idx = min(start_idx + chunk_size, obs.shape[0])
+    if device == 0:
+        results_rew = {x: [] for x in available_sample_actions}
+        for x in all_results_rew:
+            for k, v in x.items():
+                results_rew[k].extend(v)
 
-        obs_ = obs[start_idx:end_idx]
+        results_rew = {k: sum(x)/len(x) for k, x in results_rew.items()}
 
-        actions_ = actions[start_idx:end_idx]
+        for act in available_sample_actions:
+            avg_rews_dbg[act].append(results_rew[act])
 
-        rollout_ = rollout[start_idx:end_idx]
+        plt.figure()
+        for act, rew in avg_rews_dbg.items():
+            plt.plot(rew, label=f"action {act}")
+        plt.legend()
+        plt.savefig(os.path.join(save_prefix, f"obs_{ctr}.png"))
+        plt.close()
 
-        if rew is not None:
-            rew_ = rew[start_idx:end_idx]
-        else:
-            rew_ = None
+        best_rew = max(results_rew.values())
+        best_action = [x for x in results_rew.keys() if results_rew[x] == best_rew][0]
 
-        if end is not None:
-            end_ = end[start_idx:end_idx]
-        else:
-            end_ = None
-
-        obs_, actions_, rew_, end_ = rollout_trajectory_(obs_, actions_, rollout_, pbar, rew_, end_)
-
-        rv_obs[start_idx:end_idx] = obs_
-        rv_actions[start_idx:end_idx] = actions_
-        rv_rew[start_idx:end_idx] = rew_
-        rv_end[start_idx:end_idx] = end_
-
-    return rv_obs, rv_actions, rv_rew, rv_end
-
-def rollout_trajectory_(obs, actions, rollout, pbar, rew, end):
-    for rollout_idx in range(len(rollout[0])):
-        new_actions = torch.tensor([x[rollout_idx] for x in rollout], dtype=torch.long, device=device).reshape(actions.shape[0], 1)
-        actions = torch.cat([actions, new_actions], dim=1)
-
-        assert actions.shape[:2] == obs.shape[:2]
-
-        obs_ = obs[:, -num_steps_conditioning:]
-        act_ = actions[:, -num_steps_conditioning:]
-        next_obs = sampler.sample_next_obs(obs_, act_)[0]
-
-        next_obs_ = torch.cat([obs_[:, 1:], next_obs.unsqueeze(1)], dim=1)
-        obs_ = obs_.contiguous()
-        act_ = act_.contiguous()
-        next_obs_ = next_obs_.contiguous()
-        rew_, end_, _ = rew_end_model(obs_, act_, next_obs_)
-        probs = rew_[:, -1, :].softmax(dim=-1)
-        pos_probs = probs[:, 2]
-        neg_probs = probs[:, 0]
-        rew_ = pos_probs - neg_probs
-        end_ = end_[:, -1, :].argmax(dim=-1)
-        if rew is None:
-            rew = rew_.unsqueeze(1)
-        else:
-            rew = torch.cat([rew, rew_.unsqueeze(1)], dim=1)
-        if end is None:
-            end = end_.unsqueeze(1)
-        else:
-            end = torch.cat([end, end_.unsqueeze(1)], dim=1)
-
-        obs = torch.cat([obs, next_obs.unsqueeze(1)], dim=1)
-
-        if pbar is not None:
-            pbar.update(1)
-
-    return obs, actions, rew, end
-
+        return best_action
 
 if __name__ == "__main__":
     main()
