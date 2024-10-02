@@ -203,6 +203,7 @@ def save(obs, idx):
 available_sample_actions = [0, 1, 2, 3]
 
 avg_rews_dbg = {k: [] for k in available_sample_actions}
+end_dbg = {k: [] for k in available_sample_actions}
 
 def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048):
     assert prefix_obs.ndim == 5
@@ -353,21 +354,44 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
     dist.gather_object(results_rew, all_results_rew)
 
     if device == 0:
+        all_results_end = [None for _ in range(dist.get_world_size())]
+    else:
+        all_results_end = None
+
+    dist.gather_object(results_end, all_results_end)
+
+    if device == 0:
         results_rew = {x: [] for x in available_sample_actions}
         for x in all_results_rew:
             for k, v in x.items():
                 results_rew[k].extend(v)
-
         results_rew = {k: sum(x)/len(x) for k, x in results_rew.items()}
+        
+        results_end = {x: [] for x in available_sample_actions}
+        for x in all_results_end:
+            for k, v in x.items():
+                results_end[k].extend(v)
 
         for act in available_sample_actions:
             avg_rews_dbg[act].append(results_rew[act])
 
+        for act in available_sample_actions:
+            end_dbg[act].append(sum(results_end[act]))
+
+        action_to_str = {0: "NOOP", 1: "FIRE", 2: "LEFT", 3: "RIGHT"}
+
         plt.figure()
         for act, rew in avg_rews_dbg.items():
-            plt.plot(rew, label=f"action {act}")
+            plt.plot(rew, label=action_to_str[act])
         plt.legend()
         plt.savefig(os.path.join(save_prefix, f"obs_{ctr}.png"))
+        plt.close()
+
+        plt.figure()
+        for act, end in end_dbg.items():
+            plt.plot(end, label=action_to_str[act])
+        plt.legend()
+        plt.savefig(os.path.join(save_prefix, f"end_{ctr}.png"))
         plt.close()
 
         best_rew = max(results_rew.values())
