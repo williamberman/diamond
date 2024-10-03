@@ -203,7 +203,7 @@ def save(obs, idx):
     if device == 0:
         print("saved")
 
-def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048):
+def choose_action(prefix_obs, prefix_actions, ctr, depth=9, n_steps_at_once=4, max_batch_size=2048):
     assert prefix_obs.ndim == 5
     assert prefix_actions.ndim == 2
     assert prefix_obs.shape[1] == prefix_actions.shape[1] + 1
@@ -326,7 +326,6 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
     # for each final path, compute the reward and end
     for path in final_paths.keys():
         path = list(path)
-        n_steps_at_once = 4
         first_actions = tuple(path[prefix_obs.shape[0]-1:prefix_obs.shape[0]-1+n_steps_at_once])
 
         rew = None
@@ -346,7 +345,6 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
             end = end or end_.item()
 
             path.pop()
-
 
         results_rew[first_actions].append(rew)
         results_end[first_actions].append(end)
