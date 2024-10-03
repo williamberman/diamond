@@ -120,10 +120,10 @@ def init_global_state():
 
     num_steps_conditioning = agent.denoiser.inner_model.cfg.num_steps_conditioning
 
-    # denoiser = torch.compile(agent.denoiser, mode="reduce-overhead")
-    # rew_end_model = torch.compile(agent.rew_end_model, mode="reduce-overhead")
-    denoiser = agent.denoiser
-    rew_end_model = agent.rew_end_model
+    denoiser = torch.compile(agent.denoiser, mode="reduce-overhead")
+    rew_end_model = torch.compile(agent.rew_end_model, mode="reduce-overhead")
+    # denoiser = agent.denoiser
+    # rew_end_model = agent.rew_end_model
 
     sampler = DiffusionSampler(denoiser, cfg.world_model_env.diffusion_sampler)
 
