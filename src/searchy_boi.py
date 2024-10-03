@@ -15,6 +15,7 @@ import gc
 import matplotlib.pyplot as plt
 import itertools
 import tqdm
+import numpy as np
 
 OmegaConf.register_new_resolver("eval", eval)
 
@@ -226,6 +227,9 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
     scattered = False
 
     for depth_idx in range(depth):
+        gc.collect()
+        torch.cuda.empty_cache()
+
         if device == 0:
             print(f"rollout_to_depth {depth_idx+1}/{depth}")
 
@@ -305,10 +309,12 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
                 next_obs_batch = torch.cat([obs_batch[:, 1:], next_obs_batch.unsqueeze(1)], dim=1)
                 rew_batch, end_batch, _ = rew_end_model(obs_batch, actions_batch, next_obs_batch)
 
-                probs = rew_batch[:, -1, :].softmax(dim=-1)
-                pos_probs = probs[:, 2]
-                neg_probs = probs[:, 0]
-                rew_batch = pos_probs - neg_probs
+                # probs = rew_batch[:, -1, :].softmax(dim=-1)
+                # pos_probs = probs[:, 2]
+                # neg_probs = probs[:, 0]
+                # rew_batch = pos_probs - neg_probs
+                rew_batch = -(end_batch[:, -1, :].softmax(dim=-1))[:, 1]
+
                 end_batch = end_batch[:, -1, :].argmax(dim=-1)
 
                 for path, obs, rew, end in zip(paths_to_step_batch, next_obs_batch, rew_batch, end_batch):
@@ -325,7 +331,7 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
         path = list(path)
         first_action = path[prefix_obs.shape[0]-1]
 
-        rew = -float("inf")
+        rew = None
         end = False
 
         while True:
@@ -335,13 +341,14 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
             if rew_ is None or end_ is None:
                 break
 
-            rew = max(rew, rew_.item())
+            if rew is None:
+                rew = rew_.item()
+            else:
+                rew = min(rew, rew_.item())
             end = end or end_.item()
 
             path.pop()
 
-        if end:
-            rew = -1
 
         results_rew[first_action].append(rew)
         results_end[first_action].append(end)
@@ -365,8 +372,8 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
         for x in all_results_rew:
             for k, v in x.items():
                 results_rew[k].extend(v)
-        results_rew = {k: sum(x)/len(x) for k, x in results_rew.items()}
-        
+        results_rew = {k: np.median(x).item() for k, x in results_rew.items()}
+
         results_end = {x: [] for x in available_sample_actions}
         for x in all_results_end:
             for k, v in x.items():
