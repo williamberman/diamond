@@ -81,7 +81,7 @@ def main(cfg_: DictConfig):
             dist.scatter(obs, obs_send, 0)
             dist.scatter(actions, actions_send, 0)
 
-            active_actions = choose_action(obs, actions, ctr=ctr)
+            active_actions = choose_action(obs, actions, ctr=ctr, n_steps_at_once=int(os.environ["N_STEPS_AT_ONCE"]))
             if device == 0:
                 action = active_actions.pop(0)
 
@@ -203,7 +203,7 @@ def save(obs, idx):
     if device == 0:
         print("saved")
 
-def choose_action(prefix_obs, prefix_actions, ctr, depth=9, n_steps_at_once=4, max_batch_size=2048):
+def choose_action(prefix_obs, prefix_actions, ctr, depth=9, n_steps_at_once=4, max_batch_size=1024):
     assert prefix_obs.ndim == 5
     assert prefix_actions.ndim == 2
     assert prefix_obs.shape[1] == prefix_actions.shape[1] + 1
@@ -317,6 +317,59 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, n_steps_at_once=4, m
                 for path, obs, rew, end in zip(paths_to_step_batch, next_obs_batch, rew_batch, end_batch):
                     paths[tuple(path)] = {'obs': obs[-1], 'rew': rew, 'end': end}
 
+    # return calc_results_median_all_paths(prefix_obs, paths, n_steps_at_once)
+    return calc_results_backprop(prefix_obs, prefix_actions, paths, n_steps_at_once)
+
+def calc_results_backprop(prefix_obs, prefix_actions, paths, n_steps_at_once, e=0.15):
+    paths = {k: {'rew': paths[k]['rew'].item()} for k in paths.keys() if paths[k]['rew'] is not None}
+    paths_gathered = [None for _ in range(dist.get_world_size())] if device == 0 else None
+    dist.gather_object(paths, paths_gathered)
+
+    if device == 0:
+        paths_combined = {}
+        for paths_ in paths_gathered:
+            for k, v in paths_.items():
+                paths_combined[k] = v
+        paths = paths_combined
+
+        backprop = {}
+
+        max_path_len = max([len(x) for x in paths.keys()])
+
+        for max_path_len in range(max_path_len, prefix_obs.shape[0]+n_steps_at_once-2, -1):
+            print(f"max_path_len {max_path_len} len(backprop) {len(backprop)}")
+
+            paths_at_max_len = [x for x in paths.keys() if len(x) == max_path_len]
+
+            for path in paths_at_max_len:
+                assert path not in backprop
+
+                children = [path + (action,) for action in range(num_actions)]
+
+                if all([x in backprop for x in children]):
+                    children_scores = [backprop[x] for x in children]
+                    backprop[path] = max(children_scores) * (1-e) + sum(children_scores) / len(children_scores) * e
+                elif all([x not in backprop for x in children]):
+                    backprop[path] = paths[path]['rew']
+                else:
+                    assert False
+
+        min_path_len = min([len(x) for x in backprop.keys()])
+        possible_paths = [x for x in backprop.keys() if len(x) == min_path_len]
+
+        best_path = max(possible_paths, key=lambda x: backprop[x])
+        best_reward = backprop[best_path]
+        best_path = best_path[prefix_obs.shape[0]-1:]
+        assert len(best_path) == n_steps_at_once
+
+        # dbg = {k[prefix_obs.shape[0]-1:]: backprop[k] for k in possible_paths}
+        # print(dbg)
+
+        print(f"{best_path} {best_reward}")
+
+        return list(best_path)
+
+def calc_results_median_all_paths(prefix_obs, paths, n_steps_at_once):
     max_path_len = max([len(x) for x in paths.keys()])
     final_paths = {k: paths[k] for k in paths.keys() if len(k) == max_path_len}
 
