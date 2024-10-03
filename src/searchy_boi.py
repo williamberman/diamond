@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import itertools
 import tqdm
 import numpy as np
+from collections import defaultdict
 
 OmegaConf.register_new_resolver("eval", eval)
 
@@ -36,7 +37,7 @@ def main(cfg_: DictConfig):
     dist.init_process_group(backend="nccl")
     init_global_state()
 
-    skip_count = 0
+    active_actions = []
 
     if device == 0:
         env_loop_ = env_loop()
@@ -47,7 +48,11 @@ def main(cfg_: DictConfig):
         if device == 0:
             action = env_loop_.step1()
 
-            if action is None and skip_count <= 0:
+            if len(active_actions) > 0:
+                assert action is None
+                action = active_actions.pop(0)
+
+            if action is None:
                 obs_send, actions_send = env_loop_.obs, env_loop_.actions
 
                 obs_send = torch.stack(obs_send, dim=1)
@@ -58,10 +63,6 @@ def main(cfg_: DictConfig):
                 obs_send = [obs_send for _ in range(dist.get_world_size())]
                 actions_send = [actions_send for _ in range(dist.get_world_size())]
             else:
-                if skip_count > 0:
-                    action = 0
-                    skip_count -= 1
-
                 scatter_data = [None, None, False, env_loop_.ctr]
                 obs_send, actions_send = None, None
         else:
@@ -80,8 +81,9 @@ def main(cfg_: DictConfig):
             dist.scatter(obs, obs_send, 0)
             dist.scatter(actions, actions_send, 0)
 
-            action = choose_action(obs, actions, ctr=ctr)
-            skip_count = 0
+            active_actions = choose_action(obs, actions, ctr=ctr)
+            if device == 0:
+                action = active_actions.pop(0)
 
         if device == 0:
             end = env_loop_.step2(action)
@@ -201,11 +203,6 @@ def save(obs, idx):
     if device == 0:
         print("saved")
 
-available_sample_actions = [0, 1, 2, 3]
-
-avg_rews_dbg = {k: [] for k in available_sample_actions}
-end_dbg = {k: [] for k in available_sample_actions}
-
 def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048):
     assert prefix_obs.ndim == 5
     assert prefix_actions.ndim == 2
@@ -279,7 +276,7 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
             max_path_len = max([len(x) for x in paths.keys()])
 
             paths_to_step = [] 
-            for act in available_sample_actions:
+            for act in range(num_actions):
                 for path in paths.keys():
                     if len(path) == max_path_len:
                         paths_to_step.append(list(path) + [act])
@@ -323,13 +320,14 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
     max_path_len = max([len(x) for x in paths.keys()])
     final_paths = {k: paths[k] for k in paths.keys() if len(k) == max_path_len}
 
-    results_rew = {x: [] for x in available_sample_actions}
-    results_end = {x: [] for x in available_sample_actions}
+    results_rew = defaultdict(list)
+    results_end = defaultdict(list)
 
     # for each final path, compute the reward and end
     for path in final_paths.keys():
         path = list(path)
-        first_action = path[prefix_obs.shape[0]-1]
+        n_steps_at_once = 4
+        first_actions = tuple(path[prefix_obs.shape[0]-1:prefix_obs.shape[0]-1+n_steps_at_once])
 
         rew = None
         end = False
@@ -350,8 +348,8 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
             path.pop()
 
 
-        results_rew[first_action].append(rew)
-        results_end[first_action].append(end)
+        results_rew[first_actions].append(rew)
+        results_end[first_actions].append(end)
 
     if device == 0:
         all_results_rew = [None for _ in range(dist.get_world_size())]
@@ -368,43 +366,56 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
     dist.gather_object(results_end, all_results_end)
 
     if device == 0:
-        results_rew = {x: [] for x in available_sample_actions}
+        results_rew = defaultdict(list)
         for x in all_results_rew:
             for k, v in x.items():
                 results_rew[k].extend(v)
         results_rew = {k: np.median(x).item() for k, x in results_rew.items()}
 
-        results_end = {x: [] for x in available_sample_actions}
+        results_end = defaultdict(list)
         for x in all_results_end:
             for k, v in x.items():
                 results_end[k].extend(v)
 
-        for act in available_sample_actions:
-            avg_rews_dbg[act].append(results_rew[act])
-
-        for act in available_sample_actions:
-            end_dbg[act].append(sum(results_end[act])/len(results_end[act]))
-
-        action_to_str = {0: "NOOP", 1: "FIRE", 2: "RIGHT", 3: "LEFT"}
-
-        plt.figure()
-        for act, rew in avg_rews_dbg.items():
-            plt.plot(rew, label=action_to_str[act])
-        plt.legend()
-        plt.savefig(os.path.join(save_prefix, f"obs_{ctr}.png"))
-        plt.close()
-
-        plt.figure()
-        for act, end in end_dbg.items():
-            plt.plot(end, label=action_to_str[act])
-        plt.legend()
-        plt.savefig(os.path.join(save_prefix, f"end_{ctr}.png"))
-        plt.close()
-
         best_rew = max(results_rew.values())
-        best_action = [x for x in results_rew.keys() if results_rew[x] == best_rew][0]
+        best_actions = [x for x in results_rew.keys() if results_rew[x] == best_rew][0]
 
-        return best_action
+        print(f"{best_actions} {best_rew}")
+
+        return list(best_actions)
+
+avg_rews_dbg = None
+end_dbg = None
+
+def dbg(results_rew, results_end, ctr):
+    global avg_rews_dbg, end_dbg
+
+    if avg_rews_dbg is None:
+        avg_rews_dbg = {k: [] for k in range(num_actions)}
+    if end_dbg is None:
+        end_dbg = {k: [] for k in range(num_actions)}
+
+    for act in range(num_actions):
+        avg_rews_dbg[act].append(results_rew[act])
+
+    for act in range(num_actions):
+        end_dbg[act].append(sum(results_end[act])/len(results_end[act]))
+
+    action_to_str = {0: "NOOP", 1: "FIRE", 2: "RIGHT", 3: "LEFT"}
+
+    plt.figure()
+    for act, rew in avg_rews_dbg.items():
+        plt.plot(rew, label=action_to_str[act])
+    plt.legend()
+    plt.savefig(os.path.join(save_prefix, f"obs_{ctr}.png"))
+    plt.close()
+
+    plt.figure()
+    for act, end in end_dbg.items():
+        plt.plot(end, label=action_to_str[act])
+    plt.legend()
+    plt.savefig(os.path.join(save_prefix, f"end_{ctr}.png"))
+    plt.close()
 
 if __name__ == "__main__":
     main()
