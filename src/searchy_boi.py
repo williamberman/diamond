@@ -323,7 +323,7 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
     # for each final path, compute the reward and end
     for path in final_paths.keys():
         path = list(path)
-        first_action = path[prefix_obs.shape[0]-1] # TODO - something like this, what is the correct index
+        first_action = path[prefix_obs.shape[0]-1]
 
         rew = -float("inf")
         end = False
@@ -376,9 +376,9 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, max_batch_size=2048)
             avg_rews_dbg[act].append(results_rew[act])
 
         for act in available_sample_actions:
-            end_dbg[act].append(sum(results_end[act]))
+            end_dbg[act].append(sum(results_end[act])/len(results_end[act]))
 
-        action_to_str = {0: "NOOP", 1: "FIRE", 2: "LEFT", 3: "RIGHT"}
+        action_to_str = {0: "NOOP", 1: "FIRE", 2: "RIGHT", 3: "LEFT"}
 
         plt.figure()
         for act, rew in avg_rews_dbg.items():
