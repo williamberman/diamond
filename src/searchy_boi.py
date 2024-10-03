@@ -187,7 +187,7 @@ class env_loop:
 # save_prefix = "/workspace/running_with_theirs_reward_averaging/"
 # save_prefix = "/workspace/running_with_theirs_test_avg_no_mc/"
 # save_prefix = "/workspace/running_with_theirs_test_avg_no_zero/"
-save_prefix = "/workspace/test/"
+save_prefix = os.environ["SAVE_PREFIX"]
 if device == 0:
     os.makedirs(save_prefix, exist_ok=True)
 
