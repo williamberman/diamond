@@ -17,6 +17,7 @@ import itertools
 import tqdm
 import numpy as np
 from collections import defaultdict
+import math
 
 OmegaConf.register_new_resolver("eval", eval)
 
@@ -318,11 +319,13 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, n_steps_at_once=4, m
                     paths[tuple(path)] = {'obs': obs[-1], 'rew': rew, 'end': end}
 
     # out = calc_results_median_all_paths(prefix_obs, paths, n_steps_at_once)
-    out_ = calc_results_backprop(prefix_obs, paths, n_steps_at_once)
+    # out_ = calc_results_backprop(prefix_obs, paths, n_steps_at_once)
+    out__ = calc_results_backprop_2(prefix_obs, paths, n_steps_at_once)
 
     if device == 0:
         # actions, dbg = out
-        actions_, dbg_ = out_
+        # actions_, dbg_ = out_
+        actions__, dbg__ = out__
         # def fmt_dbg(x):
         #     xx = {}
         #     for k, v in x.items():
@@ -339,8 +342,121 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, n_steps_at_once=4, m
         # print(dbg_)
         # print(actions_)
         # print('***************')
-        return actions_
+        return actions__
 
+def calc_results_backprop_2(prefix_obs, paths, n_steps_at_once, e=0.15):
+    def convert_to_prob_success(rew):
+        p_success =1 - -rew
+
+        if p_success < 0.9999:
+            p_success = max(p_success - 0.5, 0)
+
+        return p_success
+
+    def safe_log(x):
+        assert x >= 0
+        return math.log(max(x, 1e-9))
+
+    paths = {k: {'rew': convert_to_prob_success(paths[k]['rew'].item())} for k in paths.keys() if paths[k]['rew'] is not None}
+
+    paths_gathered = [None for _ in range(dist.get_world_size())] if device == 0 else None
+    dist.gather_object(paths, paths_gathered)
+
+    if device == 0:
+        paths_combined = {}
+        for paths_ in paths_gathered:
+            for k, v in paths_.items():
+                paths_combined[k] = v
+        paths = paths_combined
+
+        paths_fixed = {}
+
+        for path_len in range(min([len(x) for x in paths.keys()]), max([len(x) for x in paths.keys()])+1):
+            paths_at_path_len = [x for x in paths.keys() if len(x) == path_len]
+
+            for path in paths_at_path_len:
+                assert path not in paths_fixed
+
+                parent = path[:-1]
+
+                if parent in paths_fixed:
+                    paths_fixed[path] = {"rew": min(paths_fixed[parent]["rew"], paths[path]["rew"])}
+                else:
+                    paths_fixed[path] = {"rew": paths[path]["rew"]}
+
+        assert set(paths_fixed.keys()) == set(paths.keys())
+        paths = paths_fixed
+
+        backprop = {}
+
+        max_path_len = max([len(x) for x in paths.keys()])
+
+        while True:
+            print(f"max_path_len {max_path_len} len(backprop) {len(backprop)}")
+
+            paths_at_max_len = [x for x in paths.keys() if len(x) == max_path_len]
+
+            if len(paths_at_max_len) == 0:
+                break
+
+            for path in paths_at_max_len:
+                assert path not in backprop
+
+                children = [path + (action,) for action in range(num_actions)]
+
+                if all([x in backprop for x in children]):
+                    children_scores = [math.exp(backprop[x]) for x in children]
+
+                    max_child_score = max(children_scores)
+                    mean_child_score = sum(children_scores) / len(children_scores)
+                    child_score = max_child_score * (1-e) + mean_child_score * e
+
+                    backprop[path] = safe_log(paths[path]['rew']) + safe_log(child_score)
+                elif all([x not in backprop for x in children]):
+                    backprop[path] = safe_log(paths[path]['rew'])
+                else:
+                    assert False
+
+            max_path_len -= 1
+
+        forwardprop = {}
+
+        for path_len in range(min([len(x) for x in backprop.keys()]), max([len(x) for x in backprop.keys()])+1):
+            for path in [x for x in backprop.keys() if len(x) == path_len]:
+                assert path not in forwardprop
+
+                parent = path[:-1]
+
+                if parent in forwardprop:
+                    forwardprop[path] = backprop[path] + forwardprop[parent]
+                else:
+                    forwardprop[path] = backprop[path]
+
+        paths_at_n_steps = [x for x in forwardprop.keys() if len(x) == prefix_obs.shape[0]-1+n_steps_at_once]
+
+        best_path = max(paths_at_n_steps, key=lambda x: forwardprop[x])
+        best_reward = forwardprop[best_path]
+        best_path = best_path[prefix_obs.shape[0]-1:]
+        assert len(best_path) == n_steps_at_once
+
+        dbg = {k[prefix_obs.shape[0]-1:]: math.exp(forwardprop[k]) for k in paths_at_n_steps}
+        print_dbg(dbg)
+
+        # dbg_ = {k[prefix_obs.shape[0]-1:]: forwardprop[k] for k in paths_at_n_steps}
+        # print(dbg_)
+
+        print(f"{tuple([action_to_str[int(a)] for a in best_path])} {math.exp(best_reward)}")
+
+        return list(best_path), dbg
+
+
+def print_dbg(dbg):
+    sorted_dbg = sorted(dbg.items(), key=lambda x: x[1], reverse=True)
+    print('****************')
+    for k, v in sorted_dbg:
+        kk = tuple([action_to_str[int(a)] for a in k])
+        print(f"{kk} {v}")
+    print('****************')
 
 def calc_results_backprop(prefix_obs, paths, n_steps_at_once, e=0.15):
     paths = {k: {'rew': paths[k]['rew'].item()} for k in paths.keys() if paths[k]['rew'] is not None}
