@@ -317,10 +317,32 @@ def choose_action(prefix_obs, prefix_actions, ctr, depth=9, n_steps_at_once=4, m
                 for path, obs, rew, end in zip(paths_to_step_batch, next_obs_batch, rew_batch, end_batch):
                     paths[tuple(path)] = {'obs': obs[-1], 'rew': rew, 'end': end}
 
-    # return calc_results_median_all_paths(prefix_obs, paths, n_steps_at_once)
-    return calc_results_backprop(prefix_obs, prefix_actions, paths, n_steps_at_once)
+    # out = calc_results_median_all_paths(prefix_obs, paths, n_steps_at_once)
+    out_ = calc_results_backprop(prefix_obs, paths, n_steps_at_once)
 
-def calc_results_backprop(prefix_obs, prefix_actions, paths, n_steps_at_once, e=0.15):
+    if device == 0:
+        # actions, dbg = out
+        actions_, dbg_ = out_
+        # def fmt_dbg(x):
+        #     xx = {}
+        #     for k, v in x.items():
+        #         kk = tuple([action_to_str[int(a)] for a in k])
+        #         xx[kk] = v
+        #     return xx
+        # dbg = fmt_dbg(dbg)
+        # dbg_ = fmt_dbg(dbg_)
+        # print('****************')
+        # print('median')
+        # print(dbg)
+        # print(actions)
+        # print('backprop')
+        # print(dbg_)
+        # print(actions_)
+        # print('***************')
+        return actions_
+
+
+def calc_results_backprop(prefix_obs, paths, n_steps_at_once, e=0.15):
     paths = {k: {'rew': paths[k]['rew'].item()} for k in paths.keys() if paths[k]['rew'] is not None}
     paths_gathered = [None for _ in range(dist.get_world_size())] if device == 0 else None
     dist.gather_object(paths, paths_gathered)
@@ -362,12 +384,12 @@ def calc_results_backprop(prefix_obs, prefix_actions, paths, n_steps_at_once, e=
         best_path = best_path[prefix_obs.shape[0]-1:]
         assert len(best_path) == n_steps_at_once
 
-        # dbg = {k[prefix_obs.shape[0]-1:]: backprop[k] for k in possible_paths}
+        dbg = {k[prefix_obs.shape[0]-1:]: backprop[k] for k in possible_paths}
         # print(dbg)
 
         print(f"{best_path} {best_reward}")
 
-        return list(best_path)
+        return list(best_path), dbg
 
 def calc_results_median_all_paths(prefix_obs, paths, n_steps_at_once):
     max_path_len = max([len(x) for x in paths.keys()])
@@ -433,10 +455,11 @@ def calc_results_median_all_paths(prefix_obs, paths, n_steps_at_once):
 
         print(f"{best_actions} {best_rew}")
 
-        return list(best_actions)
+        return list(best_actions), results_rew
 
 avg_rews_dbg = None
 end_dbg = None
+action_to_str = {0: "NOOP", 1: "FIRE", 2: "RIGHT", 3: "LEFT"}
 
 def dbg(results_rew, results_end, ctr):
     global avg_rews_dbg, end_dbg
@@ -451,8 +474,6 @@ def dbg(results_rew, results_end, ctr):
 
     for act in range(num_actions):
         end_dbg[act].append(sum(results_end[act])/len(results_end[act]))
-
-    action_to_str = {0: "NOOP", 1: "FIRE", 2: "RIGHT", 3: "LEFT"}
 
     plt.figure()
     for act, rew in avg_rews_dbg.items():
