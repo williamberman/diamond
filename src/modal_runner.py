@@ -32,11 +32,6 @@ image = (
 
 app = modal.App("diamond-runner", image=image)
 
-secret = modal.Secret.from_name(
-    "aws-diamond",
-    required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
-)
-
 with image.imports():
     ...
 
@@ -48,7 +43,10 @@ with image.imports():
         modal.Mount.from_local_dir("/home/ec2-user/diamond/config", remote_path="/root/config"),
     ],
     timeout=60*60*24,
-    secrets=[secret]
+    secrets=[
+        modal.Secret.from_name("aws-diamond", required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]),
+        modal.Secret.from_name("wandb")
+    ]
 )
 class Model:
     @modal.method()
@@ -88,6 +86,8 @@ class Model:
 
     @modal.method()
     def train_action_labeler(self, game):
+        os.makedirs("/mnt/raid/diamond/tiny", exist_ok=True)
+        os.system("aws s3 sync s3://shvaibackups/diamond/tiny/ /mnt/raid/diamond/tiny/")
         parser = train_action_labeler.parser_()
         args = parser.parse_args([
             "--epochs", "600",
@@ -96,14 +96,18 @@ class Model:
             "--train_size", "0.01",
             "--eval_every_n_epochs", "100",
             "--lr", "1e-6",
-            "--gpu", "7",
+            "--gpu", "0",
             "--batch_size", "64",
             "--game", game,
+            "--write_new_dataset_dir", f"/mnt/raid/diamond/tiny/{game}_recordings_100k_labeled_1000",
         ])
         train_action_labeler.main(args)
+        os.system("aws s3 sync /mnt/raid/diamond/tiny/ s3://shvaibackups/diamond/tiny/")
 
     @modal.method()
     def train_denoiser(self, game):
+        os.makedirs("/mnt/raid/diamond/tiny", exist_ok=True)
+        os.system("aws s3 sync s3://shvaibackups/diamond/tiny/ /mnt/raid/diamond/tiny/")
         os.system(f"python src/main.py \
             hydra.run.dir=/mnt/raid/diamond/tiny/{game}_100k_labeled_1000_denoiser \
             env.train.id={game}NoFrameskip-v4 \
@@ -112,10 +116,14 @@ class Model:
             collection.path_to_static_dataset=/mnt/raid/diamond/tiny/{game}_recordings_100k_labeled_1000/ \
             common.device=cuda:0 \
             denoiser.train=True \
-            rew_end_model.train=True")
+            rew_end_model.train=True \
+            actor_critic.train=False")
+        os.system("aws s3 sync /mnt/raid/diamond/tiny/ s3://shvaibackups/diamond/tiny/")
 
     @modal.method()
     def train_actor_critic(self, game):
+        os.makedirs("/mnt/raid/diamond/tiny", exist_ok=True)
+        os.system("aws s3 sync s3://shvaibackups/diamond/tiny/ /mnt/raid/diamond/tiny/")
         os.system(f"python src/main.py \
             hydra.run.dir=/mnt/raid/diamond/tiny/{game}_100k_labeled_1000_actor_critic \
             env.train.id={game}NoFrameskip-v4 \
@@ -127,6 +135,7 @@ class Model:
             rew_end_model.train=False \
             actor_critic.train=True \
             initialization.path_to_ckpt=/mnt/raid/diamond/tiny/{game}_100k_labeled_1000_denoiser/checkpoints/agent_versions/agent_epoch_01000.pt")
+        os.system("aws s3 sync /mnt/raid/diamond/tiny/ s3://shvaibackups/diamond/tiny/")
 
 @app.local_entrypoint()
 def main():
@@ -135,6 +144,6 @@ def main():
     game = "Amidar"
 
     Model().collect_recordings.remote(game)
-    # Model().train_action_labeler.remote(game)
+    Model().train_action_labeler.remote(game)
     # Model().train_denoiser.remote(game)
     # Model().train_actor_critic.remote(game)
