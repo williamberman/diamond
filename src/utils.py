@@ -267,11 +267,7 @@ def save_info_for_import_script(epoch: int, run_name: str, path_ckpt_dir: Path) 
 
 
 def save_with_backup(obj: Any, path: Path):
-    bk = path.with_suffix(".bk")
-    if path.is_file():
-        path.rename(bk)
     torch.save(obj, path)
-    bk.unlink(missing_ok=True)
 
 
 def set_seed(seed: int) -> None:
