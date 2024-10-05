@@ -62,6 +62,25 @@ class RewEndModel(nn.Module):
         end = batch.end[:, :-1]
         mask = batch.mask_padding[:, :-1]
 
+        if rew.ndim == 3:
+            ...
+        elif rew.ndim == 2:
+            # testing - will softmax to correct class
+            rew_ = torch.zeros((rew.shape[0], rew.shape[1], 3), device=rew.device, dtype=rew.dtype)
+            for b_idx in range(rew.shape[0]):
+                for t_idx in range(rew.shape[1]):
+                    val = rew[b_idx, t_idx]
+                    if val > 0:
+                        ii = 2
+                    elif val == 0:
+                        ii = 1
+                    else:
+                        ii = 0
+                    rew_[b_idx, t_idx, ii] = 50
+            rew = rew_
+        else:
+            assert False
+
         # When dead, replace frame (gray padding) by true final obs
         dead = end.bool().any(dim=1)
         if dead.any():

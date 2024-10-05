@@ -420,23 +420,20 @@ class Trainer(StateDictMixin):
 
     @torch.no_grad()
     def test_component(self, name: str) -> Logs:
-        try:
-            model = getattr(self.agent, name)
-            data_loader = self._data_loader_test.get(name)
-            model.eval()
-            to_log = []
-            for batch in tqdm(data_loader, desc=f"Evaluating {name}"):
-                batch = batch.to(self._device)
-                _, metrics = model.compute_loss(batch)
-                num_batch = self.num_batch_test.get(name)
-                metrics[f"num_batch_test_{name}"] = num_batch
-                self.num_batch_test.set(name, num_batch + 1)
-                to_log.append(metrics)
+        model = getattr(self.agent, name)
+        data_loader = self._data_loader_test.get(name)
+        model.eval()
+        to_log = []
+        for batch in tqdm(data_loader, desc=f"Evaluating {name}"):
+            batch = batch.to(self._device)
+            _, metrics = model.compute_loss(batch)
+            num_batch = self.num_batch_test.get(name)
+            metrics[f"num_batch_test_{name}"] = num_batch
+            self.num_batch_test.set(name, num_batch + 1)
+            to_log.append(metrics)
 
-            process_confusion_matrices_if_any_and_compute_classification_metrics(to_log)
-            to_log = [{f"{name}/test/{k}": v for k, v in d.items()} for d in to_log]
-        except:
-            traceback.print_exc()
+        process_confusion_matrices_if_any_and_compute_classification_metrics(to_log)
+        to_log = [{f"{name}/test/{k}": v for k, v in d.items()} for d in to_log]
         return to_log
 
     def load_state_checkpoint(self) -> None:
