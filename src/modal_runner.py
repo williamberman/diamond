@@ -24,9 +24,10 @@ image = (
         "transformers==4.44.2",
         "einops>=0.8.0",
         "einx>=0.3.0",
-        "torch"
+        "torch",
     ])
     .pip_install(["torchvision"])
+    .pip_install(["awscli"])
 )
 
 app = modal.App("diamond-runner", image=image)
@@ -41,18 +42,13 @@ with image.imports():
 
 @app.cls(
     gpu=modal.gpu.A10G(),
-    volumes={
-        "/mnt/raid/diamond": modal.CloudBucketMount(
-            bucket_name="shvaibackups",
-            key_prefix="diamond/",
-            secret=secret,
-        )
-    },
+    volumes={},
     mounts=[
         modal.Mount.from_local_dir("/home/ec2-user/diamond/config", remote_path="/config"),
         modal.Mount.from_local_dir("/home/ec2-user/diamond/config", remote_path="/root/config"),
     ],
-    timeout=60*60*24
+    timeout=60*60*24,
+    secrets=[secret]
 )
 class Model:
     @modal.method()
@@ -73,9 +69,9 @@ class Model:
         os.system("cat /mnt/raid/diamond/foo/bar.txt")
         print('***************')
 
-
     @modal.method()
     def collect_recordings(self, game):
+        os.makedirs("/mnt/raid/diamond/tiny", exist_ok=True)
         parser = play.parser()
         args = parser.parse_args([
             "--pretrained",
@@ -88,6 +84,7 @@ class Model:
             "--device", "cuda:0",
         ])
         play.main(args)
+        os.system("aws s3 sync /mnt/raid/diamond/tiny/ s3://shvaibackups/diamond/tiny/")
 
     @modal.method()
     def train_action_labeler(self, game):
