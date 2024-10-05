@@ -3,6 +3,7 @@ import multiprocessing as mp
 from pathlib import Path
 import shutil
 from typing import Any, Dict, List, Optional
+import os
 
 import numpy as np
 import torch
@@ -42,6 +43,8 @@ class Dataset(StateDictMixin, torch.utils.data.Dataset):
         self._default_path = self._directory / "info.pt"
         self._cache = mp.Manager().dict() if use_manager else {}
         self._reset()
+
+        os.makedirs(str(self._directory.absolute()), exist_ok=True)
 
     def __len__(self) -> int:
         return self.num_steps

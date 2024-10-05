@@ -426,7 +426,10 @@ class Trainer(StateDictMixin):
         to_log = []
         for batch in tqdm(data_loader, desc=f"Evaluating {name}"):
             batch = batch.to(self._device)
-            _, metrics = model.compute_loss(batch)
+            try:
+                _, metrics = model.compute_loss(batch)
+            except:
+                traceback.print_exc()
             num_batch = self.num_batch_test.get(name)
             metrics[f"num_batch_test_{name}"] = num_batch
             self.num_batch_test.set(name, num_batch + 1)

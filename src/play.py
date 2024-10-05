@@ -105,7 +105,6 @@ def get_game_name(game):
         name = game
     return name
 
-
 def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace, thread_id=None) -> Tuple[PlayEnv, Keymap, ActionNames]:
     # Checkpoint
     if args.pretrained:
@@ -116,8 +115,8 @@ def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace, thread_id=None)
 
         path_ckpt = download(f"atari_100k/{name}.pt")
         # Override config
-        cfg.agent = OmegaConf.load(download("config/agent/default.yaml"))
-        cfg.env = OmegaConf.load(download("config/env/atari.yaml"))
+        cfg.agent = agent_cfg
+        cfg.env = env_cfg
         cfg.env.train.id = cfg.env.test.id = f"{name}NoFrameskip-v4"
         cfg.world_model_env.horizon = args.horizon
     elif args.path_ckpt is not None:
@@ -198,6 +197,11 @@ def main(args):
     ok = check_args(args)
     if not ok:
         return
+
+    global agent_cfg, env_cfg
+
+    agent_cfg = OmegaConf.load(download("config/agent/default.yaml"))
+    env_cfg = OmegaConf.load(download("config/env/atari.yaml"))
 
     with initialize(version_base="1.3", config_path="../config"):
         cfg = compose(config_name="trainer")
