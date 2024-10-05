@@ -39,7 +39,7 @@ def download(filename: str) -> Path:
     return Path(path)
 
 
-def parse_args() -> argparse.Namespace:
+def parser() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--pretrained", action="store_true", help="Download pretrained world model and agent.")
     parser.add_argument("-d", "--dataset-mode", action="store_true", help="Dataset visualization mode.")
@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--headless-collect-n-threads", type=int, default=20, help="Number of threads to collect in headless mode.")
     parser.add_argument("--eps", type=float, default=None, help="Epsilon for random action selection.")
     parser.add_argument("--only-reset-after-n-deaths", type=int, default=None, help="Only reset after n deaths.")
-    return parser.parse_args()
+    return parser
 
 
 def check_args(args: argparse.Namespace) -> None:
@@ -194,8 +194,7 @@ def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace, thread_id=None)
 
 
 @torch.no_grad()
-def main():
-    args = parse_args()
+def main(args):
     ok = check_args(args)
     if not ok:
         return
@@ -290,4 +289,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = parser()
+    args = parser.parse_args()
+    main(args)

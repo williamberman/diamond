@@ -406,7 +406,16 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
 
     torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"action_labeler_final.pt"))
 
-def main(args):
+def main(args_):
+    global args
+    args = args_
+
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+
+    if args.write_new_dataset_dir is not None:
+        if os.path.exists(args.write_new_dataset_dir):
+            print(f"WARNING: {args.write_new_dataset_dir} already exists. IDK what diamond does with that. You probably just want to delete it first to be sure you cleanly overwrite it.")
+
     if args.gpu is not None:
         device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     else:
@@ -655,7 +664,7 @@ def generate_box_plot(data_lists, labels, filename, title='Box Plot', xlabel='Ca
     plt.savefig(filename)
     plt.close()
 
-if __name__ == "__main__":
+def parser_():
     parser = argparse.ArgumentParser(description="Train an image classifier for state-action prediction")
     parser.add_argument("--data_dir", type=str, default="/mnt/raid/orca_rl/trajectory_samples", help="Directory containing parquet files")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
@@ -669,12 +678,10 @@ if __name__ == "__main__":
     parser.add_argument("--eval_every_n_epochs", type=int, default=5, help="Evaluate the model every n epochs")
     parser.add_argument("--game", type=str, default=None, required=False, help="Game to evaluate on")
     parser.add_argument("--dbg", action='store_true', help="Debug mode")
+    return parser
+
+if __name__ == "__main__":
+    parser = parser_()
     args = parser.parse_args()
-
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-
-    if args.write_new_dataset_dir is not None:
-        if os.path.exists(args.write_new_dataset_dir):
-            print(f"WARNING: {args.write_new_dataset_dir} already exists. IDK what diamond does with that. You probably just want to delete it first to be sure you cleanly overwrite it.")
 
     main(args)
