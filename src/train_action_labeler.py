@@ -21,6 +21,7 @@ from collections import defaultdict
 from PIL import ImageDraw
 import gymnasium as gym
 import torch.nn.functional as F
+import json
 
 context_n_frames = 10
 assert context_n_frames == 10
@@ -373,6 +374,9 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
         if (epoch+1) % args.eval_every_n_epochs == 0 or epoch == num_epochs - 1:
             train_metrics = evaluate_model(model, train_loader, criterion, device, id=f"{epoch}_train")
 
+            with open(os.path.join(args.checkpoint_dir, f"{epoch}_train_metrics.json"), "w") as f:
+                json.dump(train_metrics, f)
+
             print(f"Train Loss: {train_metrics['avg_loss']:.4f} Train Accuracy: {train_metrics['accuracy']:.2f}%")
             print(f"Train Loss Actions: {train_metrics['avg_loss_actions']:.4f} Train Accuracy Actions: {train_metrics['accuracy_actions']:.2f}%")
             print(f"Train Loss Rewards: {train_metrics['avg_loss_rewards']:.4f} Train Accuracy Rewards: {train_metrics['accuracy_rewards']:.2f}%")
@@ -383,6 +387,9 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
                 print(f"Approx positive reward better than negative: {train_metrics['approx_positive_rew_better_than_negative']:.2f}%")
 
             test_metrics = evaluate_model(model, test_loader, criterion, device, id=f"{epoch}_test")
+
+            with open(os.path.join(args.checkpoint_dir, f"{epoch}_test_metrics.json"), "w") as f:
+                json.dump(test_metrics, f)
 
             print(f"Test Loss: {test_metrics['avg_loss']:.4f} Test Accuracy: {test_metrics['accuracy']:.2f}%")
             print(f"Test Loss Actions: {test_metrics['avg_loss_actions']:.4f} Test Accuracy Actions: {test_metrics['accuracy_actions']:.2f}%")
