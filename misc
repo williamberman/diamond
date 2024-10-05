@@ -1,5 +1,8 @@
 docker run -it --gpus all --ipc=host -v /mnt/raid:/mnt/raid -v "$(pwd)":/workspace pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime bash
-apt-get update && apt-get install ffmpeg libsm6 libxext6 git -y && pip install -r requirements.txt
+
+docker run -it --gpus all --ipc=host -v /home/tiny/fake_raid:/mnt/raid -v "$(pwd)":/workspace pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime bash
+
+apt-get update && apt-get install ffmpeg libsm6 libxext6 git build-essential -y && pip install -r requirements.txt
 
 python src/play.py --pretrained --record --recording-dir ./breakout_recordings --default-env test --game 7 --headless-collect-n-episodes 1000
 python src/train_action_labeler.py --data_dir ./breakout_recordings/
