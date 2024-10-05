@@ -48,7 +48,10 @@ with image.imports():
             secret=secret,
         )
     },
-    mounts=[modal.Mount.from_local_dir("/home/ec2-user/diamond/config", remote_path="/config")],
+    mounts=[
+        modal.Mount.from_local_dir("/home/ec2-user/diamond/config", remote_path="/config"),
+        modal.Mount.from_local_dir("/home/ec2-user/diamond/config", remote_path="/root/config"),
+    ],
     timeout=60*60*24
 )
 class Model:
