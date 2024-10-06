@@ -82,12 +82,12 @@ class Model:
             "--device", "cuda:0",
         ])
         play.main(args)
-        os.system("aws s3 sync /mnt/raid/diamond/tiny/ s3://shvaibackups/diamond/tiny/")
+        os.system(f"aws s3 sync /mnt/raid/diamond/tiny/{game}_recordings_100k/ s3://shvaibackups/diamond/tiny/{game}_recordings_100k/")
 
     @modal.method()
     def train_action_labeler(self, game):
         os.makedirs("/mnt/raid/diamond/tiny", exist_ok=True)
-        os.system("aws s3 sync s3://shvaibackups/diamond/tiny/ /mnt/raid/diamond/tiny/")
+        os.system(f"aws s3 sync s3://shvaibackups/diamond/tiny/{game}_recordings_100k/ /mnt/raid/diamond/tiny/{game}_recordings_100k/")
         parser = train_action_labeler.parser_()
         args = parser.parse_args([
             "--epochs", "600",
@@ -102,7 +102,8 @@ class Model:
             "--write_new_dataset_dir", f"/mnt/raid/diamond/tiny/{game}_recordings_100k_labeled_1000",
         ])
         train_action_labeler.main(args)
-        os.system("aws s3 sync /mnt/raid/diamond/tiny/ s3://shvaibackups/diamond/tiny/")
+        os.system(f"aws s3 sync /mnt/raid/diamond/tiny/{game}_recordings_100k_labeled_1000/ s3://shvaibackups/diamond/tiny/{game}_recordings_100k_labeled_1000/")
+        os.system(f"aws s3 sync /mnt/raid/diamond/tiny/{game}_action_labelers_100k_1000/ s3://shvaibackups/diamond/tiny/{game}_action_labelers_100k_1000/")
 
     @modal.method()
     def train_denoiser(self, game):
@@ -151,13 +152,34 @@ game_idxes = {
     10: ["Seaquest", "UpNDown"],
 }
 
+# re-run train_action_labeler for:
+"""
+modal run src/modal_runner.py --game Assault
+modal run src/modal_runner.py --game BankHeist
+modal run src/modal_runner.py --game Boxing
+modal run src/modal_runner.py --game ChopperCommand
+modal run src/modal_runner.py --game DemonAttack
+modal run src/modal_runner.py --game Frostbite
+modal run src/modal_runner.py --game Hero
+modal run src/modal_runner.py --game Kangaroo
+modal run src/modal_runner.py --game KungFuMaster
+modal run src/modal_runner.py --game RoadRunner
+modal run src/modal_runner.py --game Seaquest
+"""
+
 @app.local_entrypoint()
-def main(game_idx: int):
+# def main(game_idx: int):
+def main(game: str):
     # Model().check.remote()
 
-    for game in game_idxes[game_idx]:
-        if game != "Amidar":
-            Model().collect_recordings.remote(game)
-        Model().train_action_labeler.remote(game)
-        # Model().train_denoiser.remote(game)
-        # Model().train_actor_critic.remote(game)
+    # for game in game_idxes[game_idx]:
+    #     if game != "Amidar":
+    #         Model().collect_recordings.remote(game)
+    #     Model().train_action_labeler.remote(game)
+    #     # Model().train_denoiser.remote(game)
+    #     # Model().train_actor_critic.remote(game)
+
+    # Model().collect_recordings.remote(game)
+    Model().train_action_labeler.remote(game)
+    # Model().train_denoiser.remote(game)
+    # Model().train_actor_critic.remote(game)

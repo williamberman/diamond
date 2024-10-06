@@ -400,9 +400,9 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
             if 'approx_positive_rew_better_than_negative' in test_metrics:
                 print(f"Approx positive reward better than negative: {test_metrics['approx_positive_rew_better_than_negative']:.2f}%")
 
+            torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"action_labeler_{epoch+1}.pt"))
+
         print('**************')
-    
-        torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"action_labeler_{epoch+1}.pt"))
 
     torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"action_labeler_final.pt"))
 
