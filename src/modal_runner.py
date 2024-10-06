@@ -137,13 +137,27 @@ class Model:
             initialization.path_to_ckpt=/mnt/raid/diamond/tiny/{game}_100k_labeled_1000_denoiser/checkpoints/agent_versions/agent_epoch_01000.pt")
         os.system("aws s3 sync /mnt/raid/diamond/tiny/ s3://shvaibackups/diamond/tiny/")
 
+game_idxes = {
+    0: ["Amidar", "Assault"],
+    1: ["Asterix", "BankHeist"],
+    2: ["BattleZone", "Boxing"],
+    3: ["Breakout", "ChopperCommand"],
+    4: ["CrazyClimber", "DemonAttack"],
+    5: ["Freeway", "Frostbite"],
+    6: ["Gopher", "Hero"],
+    7: ["Jamesbond", "Kangaroo"],
+    8: ["Krull", "KungFuMaster"],
+    9: ["PrivateEye", "RoadRunner"],
+    10: ["Seaquest", "UpNDown"],
+}
+
 @app.local_entrypoint()
-def main():
+def main(game_idx: int):
     # Model().check.remote()
 
-    game = "Amidar"
-
-    Model().collect_recordings.remote(game)
-    Model().train_action_labeler.remote(game)
-    # Model().train_denoiser.remote(game)
-    # Model().train_actor_critic.remote(game)
+    for game in game_idxes[game_idx]:
+        if game != "Amidar":
+            Model().collect_recordings.remote(game)
+        Model().train_action_labeler.remote(game)
+        # Model().train_denoiser.remote(game)
+        # Model().train_actor_critic.remote(game)
