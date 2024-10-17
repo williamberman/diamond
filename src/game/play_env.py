@@ -131,6 +131,7 @@ class PlayEnv:
             entropy = dst.entropy() / math.log(2)
         entropy = None if self.is_human_player else f"{entropy.item():.2f}"
         value = None if self.is_human_player else f"{value.item():.2f}"
+        self.last_action = act.item()
         next_obs, rew, end, trunc, env_info = self.env.step(act)
         data = OneStepData(self.obs, act, rew, end, trunc)
         self.return_ += rew.item()

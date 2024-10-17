@@ -20,6 +20,7 @@ from utils import ATARI_100K_GAMES, get_path_agent_ckpt, prompt_atari_game
 import tqdm
 import math
 import os
+import random
 
 # python src/play.py --pretrained --record --recording-dir ./test_recording --default-env test --game 7 --headless-collect-n-episodes 100
 # cd src
@@ -61,8 +62,15 @@ def parser() -> argparse.Namespace:
     parser.add_argument("--horizon", type=int, default=50, help="Horizon for the world model environment.")
     parser.add_argument("--write-rewards", type=str, default=None, help="Path to write rewards.")
     parser.add_argument("--headless-collect-n-threads", type=int, default=20, help="Number of threads to collect in headless mode.")
-    parser.add_argument("--eps", type=float, default=None, help="Epsilon for random action selection.")
+    parser.add_argument("--eps", type=str, default=None, help="Epsilon for random action selection.")
+    parser.add_argument("--eps-min", type=float, default=None, help="Minimum epsilon for dynamic eps.")
+    parser.add_argument("--eps-max", type=float, default=None, help="Maximum epsilon for dynamic eps.")
+    parser.add_argument("--eps-length", type=int, default=None, help="Length of epsilon decay.")
     parser.add_argument("--only-reset-after-n-deaths", type=int, default=None, help="Only reset after n deaths.")
+    parser.add_argument("--has-negative-rewards", type=int, required=True)
+    parser.add_argument("--headless-collect-until-min-things", action="store_true", help="Collect until minimum actions and rewards in headless mode.")
+    parser.add_argument("--headless-collect-until-min-actions", type=int, default=None, help="Minimum number of actions to collect in headless mode.")
+    parser.add_argument("--headless-collect-until-min-rewards", type=int, default=None, help="Minimum number of rewards to collect in headless mode.")
     return parser
 
 
@@ -82,6 +90,15 @@ def check_args(args: argparse.Namespace) -> None:
     
     if args.headless_collect_n_episodes is not None or args.headless_collect_n_steps is not None:
         args.default_env = "train"
+
+    if args.eps is not None:
+        if args.eps == "dynamic":
+            assert args.eps_min is not None and args.eps_max is not None and args.eps_length is not None
+        else:
+            args.eps = float(args.eps)
+
+    assert args.has_negative_rewards in [0, 1], "Invalid value for --has-negative-rewards. Must be 0 or 1."
+    args.has_negative_rewards = bool(args.has_negative_rewards)
     return True
 
 
@@ -113,7 +130,7 @@ def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace, thread_id=None)
         else:
             name = get_game_name(args.game)
 
-        path_ckpt = download(f"atari_100k/{name}.pt")
+        path_ckpt = download(f"atari_100k/models/{name}.pt")
         # Override config
         cfg.agent = agent_cfg
         cfg.env = env_cfg
@@ -191,6 +208,37 @@ def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace, thread_id=None)
 
     return play_env, env_keymap
 
+def stupid_preproc(cfg: DictConfig, args: argparse.Namespace):
+    if args.pretrained:
+        if args.game is None:
+            name = prompt_atari_game()
+        else:
+            name = get_game_name(args.game)
+
+        path_ckpt = download(f"atari_100k/models/{name}.pt")
+        # Override config
+        cfg.agent = agent_cfg
+        cfg.env = env_cfg
+        cfg.env.train.id = cfg.env.test.id = f"{name}NoFrameskip-v4"
+        cfg.world_model_env.horizon = args.horizon
+    elif args.path_ckpt is not None:
+        path_ckpt = Path(args.path_ckpt)
+
+        assert args.game is not None, "Must provide game name when using --path-ckpt"
+        name = get_game_name(args.game)
+        cfg.env.train.id = cfg.env.test.id = f"{name}NoFrameskip-v4"
+        cfg.world_model_env.horizon = args.horizon
+    else:
+        path_ckpt = get_path_agent_ckpt("checkpoints", epoch=-1)
+
+    return cfg
+
+def get_num_actions(cfg: DictConfig):
+    stupid_preproc(cfg, args)
+    device = torch.device(args.device)
+    test_env = make_atari_env(num_envs=1, device=device, **cfg.env.test)
+    num_actions = test_env.num_actions
+    return num_actions
 
 @torch.no_grad()
 def main(args):
@@ -200,17 +248,21 @@ def main(args):
 
     global agent_cfg, env_cfg
 
-    agent_cfg = OmegaConf.load(download("config/agent/default.yaml"))
-    env_cfg = OmegaConf.load(download("config/env/atari.yaml"))
+    agent_cfg = OmegaConf.load(download("atari_100k/config/agent/default.yaml"))
+    env_cfg = OmegaConf.load(download("atari_100k/config/env/atari.yaml"))
 
     with initialize(version_base="1.3", config_path="../config"):
         cfg = compose(config_name="trainer")
 
-    if args.headless_collect_n_episodes is not None or args.headless_collect_n_steps is not None:
+    if args.headless_collect_n_episodes is not None or args.headless_collect_n_steps is not None or args.headless_collect_until_min_things is not None:
         if args.headless_collect_n_episodes is not None:
             print(f"Collecting {args.headless_collect_n_episodes} episodes in headless mode.")
-        else:
+        elif args.headless_collect_n_steps is not None:
             print(f"Collecting {args.headless_collect_n_steps} steps in headless mode.")
+        elif args.headless_collect_until_min_things:
+            print(f"Collecting until minimum actions: {args.headless_collect_until_min_actions} and rewards: {args.headless_collect_until_min_rewards} in headless mode.")
+        else:
+            assert False
 
         assert not args.dataset_mode
 
@@ -218,8 +270,13 @@ def main(args):
             pbar = tqdm.tqdm(total=args.headless_collect_n_threads * math.ceil(args.headless_collect_n_episodes / args.headless_collect_n_threads))
         elif args.headless_collect_n_steps is not None:
             pbar = tqdm.tqdm(total=args.headless_collect_n_threads * math.ceil(args.headless_collect_n_steps / args.headless_collect_n_threads))
+        elif args.headless_collect_until_min_things is not None:
+            pass
         else:
             assert False
+
+        action_counts = {i: 0 for i in range(get_num_actions(cfg))}
+        reward_counts = {i: 0 for i in ([-1, 0, 1] if args.has_negative_rewards else [0, 1])}
 
         def do(thread_id):
             env, _ = prepare_play_mode(cfg, args, thread_id)
@@ -234,13 +291,30 @@ def main(args):
                 env.reset()
                 rewards.append(0)
                 info = None
+                    
+                doing_no_eps = args.eps == "dynamic" and (random.random() < 0.1 or step_ctr == 0)
+                if doing_no_eps:
+                    eps = 0.0
 
                 while True:
+                    if args.eps == "dynamic" and step_ctr % args.eps_length == 0 and not doing_no_eps:
+                        eps = random.uniform(args.eps_min, args.eps_max)
+
                     on_last_life = info is not None and info["lives"].item() == 1
 
-                    _, rew, end, trunc, info = env.step(0, eps=args.eps, on_last_life=on_last_life)
+                    _, rew, end, trunc, info = env.step(0, eps=eps, on_last_life=on_last_life)
                     rewards[-1] += rew.item()
                     step_ctr += 1
+
+                    if rew.item() < 0:
+                        rew_item = -1
+                    elif rew.item() > 0:
+                        rew_item = 1
+                    else:
+                        rew_item = 0
+
+                    reward_counts[rew_item] += 1
+                    action_counts[env.last_action] += 1
 
                     if args.headless_collect_n_steps is not None:
                         pbar.update(1)
@@ -250,6 +324,14 @@ def main(args):
 
                     if args.headless_collect_n_steps is not None:
                         if step_ctr >= math.ceil(args.headless_collect_n_steps / args.headless_collect_n_threads):
+                            env.add_cur_episode_to_dataset()
+                            break
+
+                    if args.headless_collect_until_min_things is not None:
+                        if thread_id == 0 and step_ctr % 100 == 0:
+                            print(f"{step_ctr}: {action_counts} {reward_counts}")
+
+                        if all([x > args.headless_collect_until_min_actions for x in action_counts.values()]) and all([x > args.headless_collect_until_min_rewards for x in reward_counts.values()]):
                             env.add_cur_episode_to_dataset()
                             break
 
@@ -266,6 +348,9 @@ def main(args):
                 elif args.headless_collect_n_steps is not None:
                     print(f"{thread_id}: step_ctr: {step_ctr} >= {math.ceil(args.headless_collect_n_steps / args.headless_collect_n_threads)}")
                     if step_ctr >= math.ceil(args.headless_collect_n_steps / args.headless_collect_n_threads):
+                        break
+                elif args.headless_collect_until_min_things is not None:
+                    if all([x > args.headless_collect_until_min_actions for x in action_counts.values()]) and all([x > args.headless_collect_until_min_rewards for x in reward_counts.values()]):
                         break
                 else:
                     assert False
