@@ -35,6 +35,8 @@ def main():
     args.add_argument("--batch_size", type=int, default=512)
     args.add_argument("--validation_batch_size", type=int, default=1024)
     args.add_argument("--validation_steps", type=int, default=1000)
+    args.add_argument("--save_steps", type=int, default=1000)
+    args.add_argument("--save_dir", type=str, required=True)
     args = args.parse_args()
 
     assert args.has_negative_rewards in [0, 1]
@@ -83,6 +85,15 @@ def main():
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         optimizer.zero_grad()
+
+        dist.barrier()
+
+        if device == 0 and (step+1) % args.save_steps == 0:
+            state_dict = dict(model=model.state_dict(), optimizer=optimizer.state_dict())
+            os.makedirs(args.save_dir, exist_ok=True)
+            torch.save(state_dict, os.path.join(args.save_dir, f"{step}.pt"))
+
+        dist.barrier()
 
         validation_data = {}
 
