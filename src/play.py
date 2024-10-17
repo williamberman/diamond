@@ -67,6 +67,7 @@ def parser() -> argparse.Namespace:
     parser.add_argument("--eps-max", type=float, default=None, help="Maximum epsilon for dynamic eps.")
     parser.add_argument("--eps-length", type=int, default=None, help="Length of epsilon decay.")
     parser.add_argument("--only-reset-after-n-deaths", type=int, default=None, help="Only reset after n deaths.")
+    parser.add_argument("--eps-zero-prob", type=float, default=None, help="Probability of epsilon being zero.")
     parser.add_argument("--has-negative-rewards", type=int, required=True)
     parser.add_argument("--headless-collect-until-min-things", action="store_true", help="Collect until minimum actions and rewards in headless mode.")
     parser.add_argument("--headless-collect-until-min-actions", type=int, default=None, help="Minimum number of actions to collect in headless mode.")
@@ -254,7 +255,7 @@ def main(args):
     with initialize(version_base="1.3", config_path="../config"):
         cfg = compose(config_name="trainer")
 
-    if args.headless_collect_n_episodes is not None or args.headless_collect_n_steps is not None or args.headless_collect_until_min_things is not None:
+    if args.headless_collect_n_episodes is not None or args.headless_collect_n_steps is not None or args.headless_collect_until_min_things:
         if args.headless_collect_n_episodes is not None:
             print(f"Collecting {args.headless_collect_n_episodes} episodes in headless mode.")
         elif args.headless_collect_n_steps is not None:
@@ -291,14 +292,21 @@ def main(args):
                 env.reset()
                 rewards.append(0)
                 info = None
-                    
-                doing_no_eps = args.eps == "dynamic" and (random.random() < 0.1 or step_ctr == 0)
-                if doing_no_eps:
-                    eps = 0.0
+
+                if args.eps == "dynamic":
+                    if random.random() < args.eps_zero_prob:
+                        eps = 0.0
+                    else:
+                        eps = random.uniform(args.eps_min, args.eps_max)
+                else:
+                    eps = args.eps
 
                 while True:
-                    if args.eps == "dynamic" and step_ctr % args.eps_length == 0 and not doing_no_eps:
-                        eps = random.uniform(args.eps_min, args.eps_max)
+                    if args.eps == "dynamic" and step_ctr % args.eps_length == 0:
+                        if random.random() < args.eps_zero_prob:
+                            eps = 0.0
+                        else:
+                            eps = random.uniform(args.eps_min, args.eps_max)
 
                     on_last_life = info is not None and info["lives"].item() == 1
 
@@ -327,7 +335,7 @@ def main(args):
                             env.add_cur_episode_to_dataset()
                             break
 
-                    if args.headless_collect_until_min_things is not None:
+                    if args.headless_collect_until_min_things:
                         if thread_id == 0 and step_ctr % 100 == 0:
                             print(f"{step_ctr}: {action_counts} {reward_counts}")
 
@@ -349,7 +357,7 @@ def main(args):
                     print(f"{thread_id}: step_ctr: {step_ctr} >= {math.ceil(args.headless_collect_n_steps / args.headless_collect_n_threads)}")
                     if step_ctr >= math.ceil(args.headless_collect_n_steps / args.headless_collect_n_threads):
                         break
-                elif args.headless_collect_until_min_things is not None:
+                elif args.headless_collect_until_min_things:
                     if all([x > args.headless_collect_until_min_actions for x in action_counts.values()]) and all([x > args.headless_collect_until_min_rewards for x in reward_counts.values()]):
                         break
                 else:
@@ -373,7 +381,18 @@ def main(args):
     else:
         env, keymap = prepare_dataset_mode(cfg) if args.dataset_mode else prepare_play_mode(cfg, args)
         size = (args.size // cfg.env.train.size) * cfg.env.train.size  # window size
-        game = Game(env, keymap, (size, size), fps=args.fps, verbose=not args.no_header, only_reset_after_n_deaths=args.only_reset_after_n_deaths)
+        game = Game(
+            env, 
+            keymap, 
+            (size, size), 
+            fps=args.fps, 
+            verbose=not args.no_header, 
+            only_reset_after_n_deaths=args.only_reset_after_n_deaths,
+            eps_min=args.eps_min,
+            eps_max=args.eps_max,
+            eps_length=args.eps_length,
+            eps_zero_prob=args.eps_zero_prob,
+        )
         game.run()
 
 

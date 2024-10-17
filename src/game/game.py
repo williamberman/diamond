@@ -1,4 +1,5 @@
 from typing import Tuple, Union
+import random
 
 import numpy as np
 import pygame
@@ -17,7 +18,11 @@ class Game:
         size: Tuple[int, int],
         fps: int,
         verbose: bool,
-        only_reset_after_n_deaths= None
+        only_reset_after_n_deaths= None,
+        eps_length: int = None,
+        eps_min: float = None,
+        eps_max: float = None,
+        eps_zero_prob: float = None,
     ) -> None:
         self.env = play_env
         self.keymap = keymap
@@ -32,6 +37,17 @@ class Game:
         print("e : step-by-step (when paused)")
         self.env.print_controls()
         print("\n")
+
+        self.eps_min = eps_min
+        self.eps_max = eps_max
+        self.eps_length = eps_length
+        self.eps_zero_prob = eps_zero_prob
+
+        if any(v is not None for v in [eps_min, eps_max, eps_length, eps_zero_prob]):
+            assert eps_min is not None
+            assert eps_max is not None
+            assert eps_length is not None
+            assert eps_zero_prob is not None
 
     def run(self) -> None:
         pygame.init()
@@ -74,6 +90,8 @@ class Game:
         reset()
         do_wait = False
         should_stop = False
+
+        eps = None
 
         while not should_stop:
             do_one_step = False
@@ -129,7 +147,14 @@ class Game:
             if do_wait and not do_one_step:
                 continue
 
-            next_obs, rew, end, trunc, info = self.env.step(action)
+            if self.eps_length is not None and self.eps_min is not None and self.eps_max is not None and self.eps_zero_prob is not None:
+                if ep_length % self.eps_length == 0 or eps is None:
+                    if random.random() < self.eps_zero_prob:
+                        eps = 0.0
+                    else:
+                        eps = random.uniform(self.eps_min, self.eps_max)
+
+            next_obs, rew, end, trunc, info = self.env.step(action, eps=eps)
 
             ep_return += rew.item()
             ep_length += 1
