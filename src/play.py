@@ -94,7 +94,10 @@ def check_args(args: argparse.Namespace) -> None:
 
     if args.eps is not None:
         if args.eps == "dynamic":
+            print("Using dynamic epsilon!")
             assert args.eps_min is not None and args.eps_max is not None and args.eps_length is not None
+        elif args.eps == "dynamic-levels":
+            print("Using dynamic levels epsilon!")
         else:
             args.eps = float(args.eps)
 
@@ -293,20 +296,48 @@ def main(args):
                 rewards.append(0)
                 info = None
 
-                if args.eps == "dynamic":
-                    if random.random() < args.eps_zero_prob:
+                if args.eps == "dynamic-levels":
+                    level = random.choice(["bad", "med", "good", "best"])
+
+                    if level == "bad":
+                        eps_min = 0.7
+                        eps_max = 0.8
+                        eps_zero_prob = 0.0
+                    elif level == "med":
+                        eps_min = 0.5
+                        eps_max = 0.7
+                        eps_zero_prob = 0.2
+                    elif level == "good":
+                        eps_min = 0.2
+                        eps_max = 0.5
+                        eps_zero_prob = 0.8
+                    elif level == "best":
+                        eps_min = 0.0
+                        eps_max = 0.0
+                        eps_zero_prob = 1.0
+                    else:
+                        assert False
+                else:
+                    eps_zero_prob = args.eps_zero_prob
+                    eps_min = args.eps_min
+                    eps_max = args.eps_max
+
+                if args.eps in ["dynamic", "dynamic-levels"]:
+                    if random.random() < eps_zero_prob:
                         eps = 0.0
                     else:
-                        eps = random.uniform(args.eps_min, args.eps_max)
-                else:
+                        eps = random.uniform(eps_min, eps_max)
+                elif isinstance(args.eps, (float, int)):
                     eps = args.eps
+                else:
+                    assert False
 
                 while True:
-                    if args.eps == "dynamic" and step_ctr % args.eps_length == 0:
-                        if random.random() < args.eps_zero_prob:
+                    if args.eps in ["dynamic", "dynamic-levels"] and step_ctr % args.eps_length == 0:
+                        if random.random() < eps_zero_prob:
                             eps = 0.0
                         else:
-                            eps = random.uniform(args.eps_min, args.eps_max)
+                            eps = random.uniform(eps_min, eps_max)
 
                     on_last_life = info is not None and info["lives"].item() == 1
 
@@ -327,6 +358,9 @@ def main(args):
                     if args.headless_collect_n_steps is not None:
                         pbar.update(1)
 
+                    if thread_id == 0 and step_ctr % 100 == 0:
+                        print(f"{step_ctr}: {action_counts} {reward_counts}")
+
                     if on_last_life and (end or trunc):
                         break
 
@@ -336,9 +370,6 @@ def main(args):
                             break
 
                     if args.headless_collect_until_min_things:
-                        if thread_id == 0 and step_ctr % 100 == 0:
-                            print(f"{step_ctr}: {action_counts} {reward_counts}")
-
                         if all([x > args.headless_collect_until_min_actions for x in action_counts.values()]) and all([x > args.headless_collect_until_min_rewards for x in reward_counts.values()]):
                             env.add_cur_episode_to_dataset()
                             break
