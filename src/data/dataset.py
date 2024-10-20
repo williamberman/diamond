@@ -150,3 +150,6 @@ class Dataset(StateDictMixin, torch.utils.data.Dataset):
     def load_from_default_path(self) -> None:
         if self._default_path.is_file():
             self.load_state_dict(torch.load(self._default_path))
+            return True
+        else:
+            return False
