@@ -16,43 +16,38 @@ from torch import Tensor
 import torch.optim as optim
 import wandb
 import tqdm
+import numpy as np
+
+class dummy_wandb:
+    def log(*args, **kwargs): pass
+    def init(*args, **kwargs): pass
 
 device = int(os.environ['LOCAL_RANK'])
-classifying = 'actions'
 
 def main():
-    global args, model
+    global args, model, training_set_idx, validation_set_idx, wandb
 
     dist.init_process_group(backend='nccl')
 
     args = ArgumentParser()
     args.add_argument('--num_classes', type=int, required=False)
     args.add_argument('--num_input_images', type=int, default=30)
-    args.add_argument("--has_negative_rewards", type=int, required=True)
-    args.add_argument("--classifying", type=str, required=True, choices=["actions", "rewards", "end"])
-    args.add_argument("--training_dataset_path", type=str, required=True)
-    args.add_argument("--holdout_dataset_path", type=str, required=True)
+    args.add_argument("--dataset_path", type=str, required=True)
     args.add_argument("--batch_size", type=int, default=512)
     args.add_argument("--validation_batch_size", type=int, default=1024)
     args.add_argument("--validation_steps", type=int, default=1000)
     args.add_argument("--save_steps", type=int, default=1000)
     args.add_argument("--save_dir", type=str, required=True)
+    args.add_argument("--train_n_examples", type=int, required=True)
+    args.add_argument("--no_wandb", action="store_true")
+    args.add_argument("--validation_subset_n", type=int, default=None)
+    args.add_argument("--wandb_name", type=str, default=None)
     args = args.parse_args()
 
-    assert args.has_negative_rewards in [0, 1]
-    args.has_negative_rewards = bool(args.has_negative_rewards)
+    if args.no_wandb:
+        wandb = dummy_wandb()
 
-    if args.classifying == "actions":
-        assert args.num_classes
-    elif args.classifying == "rewards":
-        if args.has_negative_rewards:
-            args.num_classes = 3
-        else:
-            args.num_classes = 2
-    elif args.classifying == "end":
-        args.num_classes = 2
-    else:
-        assert False
+    training_set_idx, validation_set_idx = get_data_splits()
 
     model = ResNet(
         Bottleneck,
@@ -66,20 +61,17 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-4)
 
-    data = data_iter()
+    dataloader = iter(DataLoader(TrainingDataset(), batch_size=args.batch_size, num_workers=4))
 
     if device == 0:
-        wandb.init(project="diamond_classifier")
+        wandb.init(project="diamond_classifier", name=args.wandb_name)
 
     step = 0
 
     while True:
-        batch = next(data)
+        batch = next(dataloader)
         batch = {k: v.to(device) for k, v in batch.items()}
-        obs = batch['obs']
-        cond = torch.cat([batch['actions'], batch['rewards'], batch['ends']], dim=1)
-
-        pred = model(obs, cond)
+        pred = model(batch['obs'], batch['cond'])
         loss = F.cross_entropy(pred, batch['target'])
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -89,16 +81,17 @@ def main():
         dist.barrier()
 
         if device == 0 and (step+1) % args.save_steps == 0:
+            print(f"saving model at step {step}")
             state_dict = dict(model=model.state_dict(), optimizer=optimizer.state_dict())
             os.makedirs(args.save_dir, exist_ok=True)
-            torch.save(state_dict, os.path.join(args.save_dir, f"{step}.pt"))
+            torch.save(state_dict, os.path.join(args.save_dir, f"{step+1}.pt"))
+            print(f"done saving model at step {step}")
 
         dist.barrier()
 
         validation_data = {}
-
         if (step+1) % args.validation_steps == 0:
-            validation_data = validation()
+            validation_data = validation(subset_n=args.validation_subset_n)
 
         if device == 0:
             log_args = dict(loss=loss.item(), grad_norm=grad_norm.item(), **validation_data)
@@ -107,13 +100,61 @@ def main():
 
         step += 1
 
+def get_data_splits():
+    n_shards = 0
+    for x in os.listdir(args.dataset_path):
+        item_n = int(x.split('_')[0])
+        n_shards = max(n_shards, item_n)
+
+    print(f"total n_shards: {n_shards}")
+
+    training_set_idx = {}
+    validation_set_idx = {}
+
+    for shard_n in range(n_shards):
+        shard_path = os.path.join(args.dataset_path, f"{shard_n}_target.npy")
+        n_obs = np.load(shard_path).shape[0]
+
+        total_seen = sum([x['end_idx'] - x['start_idx'] for x in training_set_idx.values()])
+
+        if total_seen + n_obs < args.train_n_examples:
+            training_set_idx[shard_n] = dict(start_idx=0, end_idx=n_obs)
+        else:
+            n_to_add_to_training_set = max(args.train_n_examples - total_seen, 0)
+            training_set_idx[shard_n] = dict(start_idx=0, end_idx=n_to_add_to_training_set)
+            validation_set_idx[shard_n] = dict(start_idx=n_to_add_to_training_set, end_idx=n_obs)
+
+    n_examples_in_training_set = sum([x['end_idx'] - x['start_idx'] for x in training_set_idx.values()])
+    n_examples_in_validation_set = sum([x['end_idx'] - x['start_idx'] for x in validation_set_idx.values()])
+
+    print(f"n_examples_in_training_set: {n_examples_in_training_set} n_examples_in_validation_set: {n_examples_in_validation_set}")
+
+    assert n_examples_in_training_set == args.train_n_examples
+
+    return training_set_idx, validation_set_idx
+
+class TrainingDataset(IterableDataset):
+    def __iter__(self):
+        while True:
+            shard_idx = random.choice(list(training_set_idx.keys()))
+
+            obs = torch.from_numpy(np.load(os.path.join(args.dataset_path, f"{shard_idx}_obs.npy")))
+            cond = torch.from_numpy(np.load(os.path.join(args.dataset_path, f"{shard_idx}_cond.npy")))
+            target = torch.from_numpy(np.load(os.path.join(args.dataset_path, f"{shard_idx}_target.npy")))
+
+            perm = [x for x in range(training_set_idx[shard_idx]['start_idx'], training_set_idx[shard_idx]['end_idx'])]
+            random.shuffle(perm)
+
+            for i in perm:
+                yield dict(obs=obs[i], cond=cond[i], target=target[i])
+
 @torch.no_grad()
-def validation():
+def validation(subset_n=None):
     dist.barrier()
 
     validation_data = None
 
-    pbar = tqdm.tqdm()
+    pbar = tqdm.tqdm(total=subset_n)
 
     if device == 0:
         print("running validation")
@@ -128,29 +169,39 @@ def validation():
         validation_model = model.module
         validation_model.eval().requires_grad_(False)
 
-        validation_iter_ = validation_iter()
+        for shard_idx in validation_set_idx:
+            shard_obs = torch.from_numpy(np.load(os.path.join(args.dataset_path, f"{shard_idx}_obs.npy")))
+            shard_cond = torch.from_numpy(np.load(os.path.join(args.dataset_path, f"{shard_idx}_cond.npy")))
+            shard_target = torch.from_numpy(np.load(os.path.join(args.dataset_path, f"{shard_idx}_target.npy")))
 
-        for batch in validation_iter_:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            obs = batch['obs']
-            cond = torch.cat([batch['actions'], batch['rewards'], batch['ends']], dim=1)
+            for start_idx in range(validation_set_idx[shard_idx]['start_idx'], validation_set_idx[shard_idx]['end_idx'], args.validation_batch_size):
+                end_idx = min(start_idx + args.validation_batch_size, validation_set_idx[shard_idx]['end_idx'])
+                obs = shard_obs[start_idx:end_idx].to(device)
+                cond = shard_cond[start_idx:end_idx].to(device)
+                target = shard_target[start_idx:end_idx].to(device)
 
-            pred = validation_model(obs, cond)
-            loss = F.cross_entropy(pred, batch['target'])
-            validation_loss.append(loss.item())
+                pred = validation_model(obs, cond)
+                loss = F.cross_entropy(pred, target)
+                validation_loss.append(loss.item())
 
-            total += batch['target'].shape[0]
-            correct += (pred.argmax(dim=1) == batch['target']).sum().item()
+                total += target.shape[0]
+                correct += (pred.argmax(dim=1) == target).sum().item()
 
-            for i in range(args.num_classes):
-                mask = batch['target'] == i
-                pred_ = pred[mask]
-                target_ = batch['target'][mask]
+                for i in range(args.num_classes):
+                    mask = target == i
+                    pred_ = pred[mask]
+                    target_ = target[mask]
 
-                correct_classes[i] += (pred_.argmax(dim=1) == target_).sum().item()
-                total_classes[i] += target_.shape[0]
+                    correct_classes[i] += (pred_.argmax(dim=1) == target_).sum().item()
+                    total_classes[i] += target_.shape[0]
 
-            pbar.update(1)
+                pbar.update(target.shape[0])
+
+                if subset_n is not None and total >= subset_n:
+                    break
+
+            if subset_n is not None and total >= subset_n:
+                break
 
         validation_loss = sum(validation_loss) / len(validation_loss)
         accuracy = correct / total
@@ -167,97 +218,6 @@ def validation():
     dist.barrier()
 
     return validation_data
-
-def validation_iter():
-    for dataset_path in os.listdir(args.holdout_dataset_path):
-        iterable = iter(iterate_diamond_dataset(os.path.join(args.holdout_dataset_path, dataset_path), None))
-        done = False
-
-        while True:
-            batch = []
-
-            while len(batch) < args.validation_batch_size:
-                try:
-                    batch.append(next(iterable))
-                except StopIteration:
-                    done = True
-                    break
-
-            yield default_collate(batch)
-
-            if done:
-                break
-
-def data_iter():
-    data_iters = [
-        iter(DataLoader(TrainingDataset(args.training_dataset_path, action_idx), num_workers=1, batch_size=1, collate_fn=lambda x: x))
-        for action_idx in range(args.num_classes)
-    ]
-
-    data_iter_idx = 0
-
-    while True:
-        batch = []
-
-        while len(batch) < args.batch_size:
-            batch.append(next(data_iters[data_iter_idx])[0])
-            data_iter_idx = (data_iter_idx + 1) % len(data_iters)
-
-        yield default_collate(batch)
-
-class TrainingDataset(IterableDataset):
-    def __init__(self, dataset_path, action_idx):
-        self.dataset_path = dataset_path
-        self.action_idx = action_idx
-
-    def __iter__(self):
-        while True:
-            dataset_path = os.path.join(self.dataset_path, random.choice(os.listdir(self.dataset_path)))
-            for x in iterate_diamond_dataset(dataset_path, self.action_idx):
-                yield x
-
-def iterate_diamond_dataset(dataset_path, action_idx):
-    dataset = DiamondDataset(dataset_path)
-    dataset.load_from_default_path()
-
-    for episode_id in range(dataset.num_episodes):
-        episode = dataset.load_episode(episode_id)
-
-        for i in range(len(episode) - args.num_input_images + 1):
-            obs = episode.obs[i:i+args.num_input_images].flatten(0, 1)
-            actions = episode.act[i:i+args.num_input_images]
-            rewards = episode.rew[i:i+args.num_input_images]
-            ends = episode.end[i:i+args.num_input_images]
-
-            # target is in the middle
-            target_idx = args.num_input_images // 2
-
-            if args.classifying == "actions":
-                target = actions[target_idx]
-                if action_idx is not None and target != action_idx:
-                    continue
-                actions = torch.cat([actions[:target_idx], actions[target_idx+1:]])
-            elif args.classifying == "rewards":
-                assert False, "TODO what is actually in the dataset"
-                target_reward = rewards[target_idx]
-
-                if action_idx is not None and target_reward != action_idx:
-                    continue
-            elif args.classifying == "ends":
-                target = ends[target_idx]
-                if action_idx is not None and target != action_idx:
-                    continue
-                ends = torch.cat([ends[:target_idx], ends[target_idx+1:]])
-            else:
-                assert False
-
-            yield dict(
-                obs=obs,
-                actions=actions,
-                rewards=rewards,
-                ends=ends,
-                target=target,
-            )
 
 class AdaLN(nn.Module):
     def __init__(self, num_features, cond_features):
