@@ -1,13 +1,10 @@
 import os
-from functools import partial
-from typing import Any, Callable, List, Optional, Type, Union
-from torchvision.models.resnet import BasicBlock, conv1x1, conv3x3, _log_api_usage_once
+from typing import Callable, List, Optional, Type, Union
+from torchvision.models.resnet import conv1x1, conv3x3, _log_api_usage_once
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from argparse import ArgumentParser
-from data import Dataset as DiamondDataset, Episode
-from torch.utils.data import DataLoader, Dataset, IterableDataset
-from torch.utils.data.dataloader import default_collate
+from torch.utils.data import DataLoader, IterableDataset
 import random
 import torch.nn.functional as F
 import torch
@@ -42,6 +39,7 @@ def main():
     args.add_argument("--no_wandb", action="store_true")
     args.add_argument("--validation_subset_n", type=int, default=None)
     args.add_argument("--wandb_name", type=str, default=None)
+    args.add_argument("--model", type=str, required=True, choices=resnet_configs.keys())
     args = args.parse_args()
 
     if args.no_wandb:
@@ -50,8 +48,7 @@ def main():
     training_set_idx, validation_set_idx = get_data_splits()
 
     model = ResNet(
-        Bottleneck,
-        [3, 8, 36, 3],
+        **resnet_configs[args.model],
         num_classes=args.num_classes,
         input_channels=3*args.num_input_images,
         inplanes=256,
@@ -241,7 +238,7 @@ class AdaLN(nn.Module):
 class ResNet(nn.Module):
     def __init__(
         self,
-        block: Type[Union[BasicBlock, 'Bottleneck']],
+        block: Type[Union['BasicBlock', 'Bottleneck']],
         layers: List[int],
         num_classes: int = 1000,
         zero_init_residual: bool = False,
@@ -301,7 +298,7 @@ class ResNet(nn.Module):
 
     def _make_layer(
         self,
-        block: Type[Union[BasicBlock, 'Bottleneck']],
+        block: Type[Union['BasicBlock', 'Bottleneck']],
         planes: int,
         blocks: int,
         stride: int = 1,
@@ -418,6 +415,64 @@ class Bottleneck(nn.Module):
         out = self.relu(out)
 
         return out
+
+class BasicBlock(nn.Module):
+    expansion: int = 1
+
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        if groups != 1 or base_width != 64:
+            raise ValueError("BasicBlock only supports groups=1 and base_width=64")
+        if dilation > 1:
+            raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+        # Both self.conv1 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = norm_layer(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = norm_layer(planes)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x: Tensor, cond) -> Tensor:
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out, cond)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out, cond)
+
+        if self.downsample is not None:
+            assert len(self.downsample) == 2
+            identity = self.downsample[0](x)
+            identity = self.downsample[1](identity, cond)
+
+        out += identity
+        out = self.relu(out)
+
+        return out
+
+resnet_configs = dict(
+    resnet18=dict(block=BasicBlock, layers=[2, 2, 2, 2]),
+    resnet34=dict(block=BasicBlock, layers=[3, 4, 6, 3]),
+    resnet50=dict(block=Bottleneck, layers=[3, 4, 6, 3]),
+    resnet101=dict(block=Bottleneck, layers=[3, 4, 23, 3]),
+    resnet152=dict(block=Bottleneck, layers=[3, 8, 36, 3])
+)
 
 if __name__ == "__main__":
     main()
