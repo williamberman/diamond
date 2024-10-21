@@ -61,12 +61,15 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-4)
 
-    dataloader = iter(DataLoader(TrainingDataset(), batch_size=args.batch_size, num_workers=4))
+    dataloader = iter(DataLoader(TrainingDataset(), batch_size=args.batch_size, num_workers=8))
 
     if device == 0:
         wandb.init(project="diamond_classifier", name=args.wandb_name)
 
     step = 0
+
+    if device == 0:
+        print("starting training loop")
 
     while True:
         batch = next(dataloader)
@@ -111,7 +114,7 @@ def get_data_splits():
     training_set_idx = {}
     validation_set_idx = {}
 
-    for shard_n in range(n_shards):
+    for shard_n in tqdm.tqdm(range(n_shards), desc="making train split"):
         shard_path = os.path.join(args.dataset_path, f"{shard_n}_target.npy")
         n_obs = np.load(shard_path).shape[0]
 
@@ -121,8 +124,10 @@ def get_data_splits():
             training_set_idx[shard_n] = dict(start_idx=0, end_idx=n_obs)
         else:
             n_to_add_to_training_set = max(args.train_n_examples - total_seen, 0)
-            training_set_idx[shard_n] = dict(start_idx=0, end_idx=n_to_add_to_training_set)
-            validation_set_idx[shard_n] = dict(start_idx=n_to_add_to_training_set, end_idx=n_obs)
+            if n_to_add_to_training_set > 0:
+                training_set_idx[shard_n] = dict(start_idx=0, end_idx=n_to_add_to_training_set)
+            if n_obs - n_to_add_to_training_set > 0:
+                validation_set_idx[shard_n] = dict(start_idx=n_to_add_to_training_set, end_idx=n_obs)
 
     n_examples_in_training_set = sum([x['end_idx'] - x['start_idx'] for x in training_set_idx.values()])
     n_examples_in_validation_set = sum([x['end_idx'] - x['start_idx'] for x in validation_set_idx.values()])
