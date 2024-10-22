@@ -52,7 +52,6 @@ def main():
         **resnet_configs[args.model],
         num_classes=args.num_classes,
         input_channels=3*args.num_input_images,
-        inplanes=256,
         norm_layer=lambda x: AdaLN(x, args.num_input_images*3-1),
     ).train().requires_grad_(True).to(device)
     model = DDP(model, device_ids=[device])
@@ -91,10 +90,10 @@ def main():
         dist.barrier()
 
         validation_data = {}
+        done = [False]
 
         if (step+1) % args.validation_steps == 0:
             validation_data = validation(subset_n=args.validation_subset_n)
-            done = [False]
             if device == 0 and ('validation_loss/avg_prev' in validation_data or 'validation_loss/avg_cur' in validation_data):
                 # stop training if we have not improved validation loss by at least .01
                 done = [validation_data['validation_loss/avg_prev'] - 0.01 <= validation_data['validation_loss/avg_cur']]
@@ -510,12 +509,18 @@ class BasicBlock(nn.Module):
         return out
 
 resnet_configs = dict(
-    resnet_smol=dict(block=BasicBlock, layers=[1, 1], dims=[64, 128]),
-    resnet18=dict(block=BasicBlock, layers=[2, 2, 2, 2]),
-    resnet34=dict(block=BasicBlock, layers=[3, 4, 6, 3]),
-    resnet50=dict(block=Bottleneck, layers=[3, 4, 6, 3]),
-    resnet101=dict(block=Bottleneck, layers=[3, 4, 23, 3]),
-    resnet152=dict(block=Bottleneck, layers=[3, 8, 36, 3])
+    resnet_sweep_1=dict(block=BasicBlock, layers=[1], dims=[256], inplanes=256),
+    resnet_sweep_2=dict(block=BasicBlock, layers=[2], dims=[256], inplanes=256),
+    resnet_sweep_3=dict(block=BasicBlock, layers=[3], dims=[256], inplanes=256),
+    resnet_sweep_4=dict(block=BasicBlock, layers=[4], dims=[256], inplanes=256),
+    resnet_sweep_5=dict(block=BasicBlock, layers=[5], dims=[256], inplanes=256),
+
+    resnet_smol=dict(block=BasicBlock, layers=[1, 1], dims=[64, 128], inplanes=256),
+    resnet18=dict(block=BasicBlock, layers=[2, 2, 2, 2], inplanes=256),
+    resnet34=dict(block=BasicBlock, layers=[3, 4, 6, 3], inplanes=256),
+    resnet50=dict(block=Bottleneck, layers=[3, 4, 6, 3], inplanes=256),
+    resnet101=dict(block=Bottleneck, layers=[3, 4, 23, 3], inplanes=256),
+    resnet152=dict(block=Bottleneck, layers=[3, 8, 36, 3], inplanes=256)
 )
 
 if __name__ == "__main__":
