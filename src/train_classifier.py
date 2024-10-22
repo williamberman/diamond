@@ -5,7 +5,6 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from argparse import ArgumentParser
 from torch.utils.data import DataLoader, IterableDataset
-import random
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
@@ -14,6 +13,8 @@ import torch.optim as optim
 import wandb
 import tqdm
 import numpy as np
+import concurrent.futures
+import time
 
 class dummy_wandb:
     def log(*args, **kwargs): pass
@@ -41,6 +42,8 @@ def main():
     args.add_argument("--wandb_name", type=str, default=None)
     args.add_argument("--model", type=str, required=True, choices=resnet_configs.keys())
     args.add_argument("--lr", type=float, default=1e-4)
+    args.add_argument("--training_data_buffer_size_gb", type=int, required=True)
+    args.add_argument("--training_data_buffer_thread_count", type=int, required=True)
     args = args.parse_args()
 
     if args.no_wandb:
@@ -58,7 +61,7 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 
-    dataloader = iter(DataLoader(TrainingDataset(), batch_size=args.batch_size, num_workers=8))
+    dataloader = iter(DataLoader(TrainingDataset(), batch_size=1, num_workers=0, collate_fn=lambda x: x[0]))
 
     if device == 0:
         wandb.init(project="diamond_classifier", name=args.wandb_name)
@@ -69,6 +72,8 @@ def main():
         print("starting training loop")
 
     while True:
+        t0 = time.perf_counter()
+
         batch = next(dataloader)
         batch = {k: v.to(device) for k, v in batch.items()}
         pred = model(batch['obs'], batch['cond'])
@@ -99,7 +104,7 @@ def main():
                 done = [validation_data['validation_loss/avg_prev'] - 0.01 <= validation_data['validation_loss/avg_cur']]
 
         if device == 0:
-            log_args = dict(loss=loss.item(), grad_norm=grad_norm.item(), **validation_data)
+            log_args = dict(loss=loss.item(), grad_norm=grad_norm.item(), step_time=time.perf_counter() - t0, **validation_data)
             wandb.log(log_args, step=step)
             print(f"{step}: {log_args}")
 
@@ -151,18 +156,112 @@ def get_data_splits():
 
 class TrainingDataset(IterableDataset):
     def __iter__(self):
-        while True:
-            shard_idx = random.choice(list(training_set_idx.keys()))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.training_data_buffer_thread_count) as thread_pool:
+            obs_max_size_bytes = args.training_data_buffer_size_gb * 1024 * 1024 * 1024
+            bytes_per_obs = 3*args.num_input_images * 64 * 64 * 4
 
-            obs = torch.from_numpy(np.load(os.path.join(args.dataset_path, f"{shard_idx}_obs.npy")))
-            cond = torch.from_numpy(np.load(os.path.join(args.dataset_path, f"{shard_idx}_cond.npy")))
-            target = torch.from_numpy(np.load(os.path.join(args.dataset_path, f"{shard_idx}_target.npy")))
+            max_n_obs = obs_max_size_bytes // bytes_per_obs // 2
 
-            perm = [x for x in range(training_set_idx[shard_idx]['start_idx'], training_set_idx[shard_idx]['end_idx'])]
-            random.shuffle(perm)
+            obs1 = np.zeros((max_n_obs, 3*args.num_input_images, 64, 64), dtype=np.float32)
+            cond1 = np.zeros((max_n_obs, 3*args.num_input_images-1), dtype=np.float32)
+            target1 = np.zeros((max_n_obs), dtype=np.int64)
 
-            for i in perm:
-                yield dict(obs=obs[i], cond=cond[i], target=target[i])
+            obs2 = np.zeros((max_n_obs, 3*args.num_input_images, 64, 64), dtype=np.float32)
+            cond2 = np.zeros((max_n_obs, 3*args.num_input_images-1), dtype=np.float32)
+            target2 = np.zeros((max_n_obs), dtype=np.int64)
+
+            def mmap_shard(shard_idx):
+                return {
+                    "obs": np.load(os.path.join(args.dataset_path, f"{shard_idx}_obs.npy"), mmap_mode='r'),
+                    "cond": np.load(os.path.join(args.dataset_path, f"{shard_idx}_cond.npy"), mmap_mode='r'),
+                    "target": np.load(os.path.join(args.dataset_path, f"{shard_idx}_target.npy"), mmap_mode='r')
+                }
+
+            mmapped_training_shards = [x for x in tqdm.tqdm(
+                thread_pool.map(mmap_shard, training_set_idx.keys()),
+                desc="mmapping training shards",
+                total=len(training_set_idx)
+            )]
+                
+            shard_idx = 0
+
+            def fill_training_buffer(obs, cond, target, pbar_disable):
+                nonlocal shard_idx
+
+                load_idx_args = []
+                shard_idx_args = []
+                start_idx_args = []
+                end_idx_args = []
+
+                load_idx = 0
+
+                while load_idx < obs.shape[0]:
+                    # calculate what indices we need to load from this shard
+                    start_idx = training_set_idx[shard_idx]['start_idx']
+                    end_idx = start_idx + min(obs.shape[0] - load_idx, training_set_idx[shard_idx]['end_idx'] - start_idx)
+
+                    load_idx_args.append(load_idx)
+                    shard_idx_args.append(shard_idx)
+                    start_idx_args.append(start_idx)
+                    end_idx_args.append(end_idx)
+
+                    load_idx += end_idx - start_idx
+                    shard_idx = (shard_idx + 1) % len(mmapped_training_shards)
+
+                def load_shard(load_idx, shard_idx, start_idx, end_idx):
+                    obs[load_idx:load_idx + end_idx - start_idx] = mmapped_training_shards[shard_idx]['obs'][start_idx:end_idx]
+                    cond[load_idx:load_idx + end_idx - start_idx] = mmapped_training_shards[shard_idx]['cond'][start_idx:end_idx]
+                    target[load_idx:load_idx + end_idx - start_idx] = mmapped_training_shards[shard_idx]['target'][start_idx:end_idx]
+
+                [x for x in tqdm.tqdm(
+                    thread_pool.map(load_shard, load_idx_args, shard_idx_args, start_idx_args, end_idx_args),
+                    desc="loading training shards into memory",
+                    total=len(load_idx_args),
+                    disable=pbar_disable
+                )]
+
+                if pbar_disable:
+                    print(f"loaded next training data buffer")
+
+                return obs, cond, target
+
+            obs, cond, target = thread_pool.submit(fill_training_buffer, obs1, cond1, target1, pbar_disable=False).result()
+            fill_future = thread_pool.submit(fill_training_buffer, obs2, cond2, target2, pbar_disable=True)
+
+            idx = 0
+
+            while True:
+                if idx + args.batch_size > obs.shape[0]:
+                    obs_ = obs[idx:]
+                    cond_ = cond[idx:]
+                    target_ = target[idx:]
+
+                    remaining = args.batch_size - obs_.shape[0]
+
+                    next_fill_future = thread_pool.submit(fill_training_buffer, obs, cond, target, pbar_disable=True)
+                    obs, cond, target = fill_future.result()
+                    fill_future = next_fill_future
+
+                    obs_ = np.concatenate([obs_, obs[:remaining]])
+                    cond_ = np.concatenate([cond_, cond[:remaining]])
+                    target_ = np.concatenate([target_, target[:remaining]])
+
+                    idx = remaining
+                else:
+                    obs_ = obs[idx:idx + args.batch_size]
+                    cond_ = cond[idx:idx + args.batch_size]
+                    target_ = target[idx:idx + args.batch_size]
+                    idx += args.batch_size
+
+                assert obs_.shape[0] == args.batch_size
+                assert cond_.shape[0] == args.batch_size
+                assert target_.shape[0] == args.batch_size
+
+                yield dict(
+                    obs=torch.tensor(obs_),
+                    cond=torch.tensor(cond_),
+                    target=torch.tensor(target_)
+                )
     
 all_validation_data = []
 
