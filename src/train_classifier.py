@@ -90,8 +90,13 @@ def main():
         dist.barrier()
 
         validation_data = {}
+
         if (step+1) % args.validation_steps == 0:
             validation_data = validation(subset_n=args.validation_subset_n)
+            done = [False]
+            if device == 0 and ('validation_loss/avg_prev' in validation_data or 'validation_loss/avg_cur' in validation_data):
+                # stop training if we have not improved validation loss by at least .01
+                done = [validation_data['validation_loss/avg_prev'] - 0.01 <= validation_data['validation_loss/avg_cur']]
 
         if device == 0:
             log_args = dict(loss=loss.item(), grad_norm=grad_norm.item(), **validation_data)
@@ -99,6 +104,15 @@ def main():
             print(f"{step}: {log_args}")
 
         step += 1
+
+        dist.broadcast_object_list(done, src=0)
+        if done[0]:
+            break
+
+    validation_data = validation(subset_n=None)
+    if device == 0:
+        print(f"final validation data: {validation_data}")
+        wandb.log(validation_data, step=step)
 
 def get_data_splits():
     n_shards = 0
@@ -149,6 +163,8 @@ class TrainingDataset(IterableDataset):
 
             for i in perm:
                 yield dict(obs=obs[i], cond=cond[i], target=target[i])
+    
+all_validation_data = []
 
 @torch.no_grad()
 def validation(subset_n=None):
@@ -209,7 +225,7 @@ def validation(subset_n=None):
         accuracy = correct / total
 
         validation_data = {
-            "validation_loss": validation_loss,
+            "validation_loss/cur": validation_loss,
             "accuracy/total": accuracy,
             "total/total": total,
             "correct/total": correct,
@@ -219,6 +235,17 @@ def validation(subset_n=None):
             validation_data[f"accuracy/{i}"] = correct_classes[i] / total_classes[i]
             validation_data[f"total/{i}"] = total_classes[i]
             validation_data[f"correct/{i}"] = correct_classes[i]
+
+        all_validation_data.append(validation_data)
+
+        if len(all_validation_data) >= 10:
+            prev = [x['validation_loss/cur'] for x in all_validation_data[-10:-5]]
+            cur = [x['validation_loss/cur'] for x in all_validation_data[-5:]]
+            assert len(prev) == 5 and len(cur) == 5
+            avg_prev = sum(prev) / len(prev)
+            avg_cur = sum(cur) / len(cur)
+            validation_data["validation_loss/avg_prev"] = avg_prev
+            validation_data["validation_loss/avg_cur"] = avg_cur
 
         validation_model.train().requires_grad_(True)
 
