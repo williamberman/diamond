@@ -208,12 +208,17 @@ def validation(subset_n=None):
         validation_loss = sum(validation_loss) / len(validation_loss)
         accuracy = correct / total
 
-        validation_data = dict(validation_loss=validation_loss, accuracy=accuracy, total=total, correct=correct)
+        validation_data = {
+            "validation_loss": validation_loss,
+            "accuracy/total": accuracy,
+            "total/total": total,
+            "correct/total": correct,
+        }
 
         for i in range(args.num_classes):
-            validation_data[f"accuracy_{i}"] = correct_classes[i] / total_classes[i]
-            validation_data[f"total_{i}"] = total_classes[i]
-            validation_data[f"correct_{i}"] = correct_classes[i]
+            validation_data[f"accuracy/{i}"] = correct_classes[i] / total_classes[i]
+            validation_data[f"total/{i}"] = total_classes[i]
+            validation_data[f"correct/{i}"] = correct_classes[i]
 
         validation_model.train().requires_grad_(True)
 
@@ -235,6 +240,10 @@ class AdaLN(nn.Module):
         x = x.permute(0, 3, 1, 2)
         return x
 
+class BatchNorm2d(nn.BatchNorm2d):
+    def forward(self, x, cond):
+        return super().forward(x)
+
 class ResNet(nn.Module):
     def __init__(
         self,
@@ -252,7 +261,7 @@ class ResNet(nn.Module):
         super().__init__()
         _log_api_usage_once(self)
         if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
+            norm_layer = BatchNorm2d
         self._norm_layer = norm_layer
 
         self.inplanes = inplanes
@@ -272,17 +281,21 @@ class ResNet(nn.Module):
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 64, layers[0])
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1])
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
+
+        self.layers = nn.ModuleList()
+
+        for dim, n in zip([64, 128, 256, 512], layers):
+            self.layers.append(self._make_layer(block, dim, n))
+
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * block.expansion, num_classes)
+        self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
+
+        self.fc = nn.Linear(dim * block.expansion*2, num_classes)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm, BatchNorm2d)):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
@@ -344,12 +357,12 @@ class ResNet(nn.Module):
         x = self.relu(x)
         x = self.maxpool(x)
 
-        for layer in [self.layer1, self.layer2, self.layer3, self.layer4]:
+        for layer in self.layers:
             for block in layer:
                 x = block(x, cond)
 
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
+        x = torch.cat([self.avgpool(x).flatten(1), self.maxpool(x).flatten(1)], dim=1)
+        x = F.layer_norm(x, (x.shape[1],))
         x = self.fc(x)
 
         return x
@@ -379,7 +392,7 @@ class Bottleneck(nn.Module):
     ) -> None:
         super().__init__()
         if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
+            norm_layer = BatchNorm2d
         width = int(planes * (base_width / 64.0)) * groups
         # Both self.conv2 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv1x1(inplanes, width)
@@ -432,7 +445,7 @@ class BasicBlock(nn.Module):
     ) -> None:
         super().__init__()
         if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
+            norm_layer = BatchNorm2d
         if groups != 1 or base_width != 64:
             raise ValueError("BasicBlock only supports groups=1 and base_width=64")
         if dilation > 1:
@@ -467,6 +480,7 @@ class BasicBlock(nn.Module):
         return out
 
 resnet_configs = dict(
+    resnet_smol=dict(block=BasicBlock, layers=[1, 1]),
     resnet18=dict(block=BasicBlock, layers=[2, 2, 2, 2]),
     resnet34=dict(block=BasicBlock, layers=[3, 4, 6, 3]),
     resnet50=dict(block=Bottleneck, layers=[3, 4, 6, 3]),
