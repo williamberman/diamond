@@ -257,9 +257,11 @@ class ResNet(nn.Module):
         norm_layer: Optional[Callable[..., nn.Module]] = None,
         inplanes: int = 64,
         input_channels: int = 3,
+        dims: List[int] = [64, 128, 256, 512],
     ) -> None:
         super().__init__()
         _log_api_usage_once(self)
+        assert len(dims) == len(layers)
         if norm_layer is None:
             norm_layer = BatchNorm2d
         self._norm_layer = norm_layer
@@ -284,8 +286,8 @@ class ResNet(nn.Module):
 
         self.layers = nn.ModuleList()
 
-        for dim, n in zip([64, 128, 256, 512], layers):
-            self.layers.append(self._make_layer(block, dim, n))
+        for dim, n_layer in zip(dims, layers):
+            self.layers.append(self._make_layer(block, dim, n_layer))
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
@@ -480,7 +482,7 @@ class BasicBlock(nn.Module):
         return out
 
 resnet_configs = dict(
-    resnet_smol=dict(block=BasicBlock, layers=[1, 1]),
+    resnet_smol=dict(block=BasicBlock, layers=[1, 1], dims=[64, 128]),
     resnet18=dict(block=BasicBlock, layers=[2, 2, 2, 2]),
     resnet34=dict(block=BasicBlock, layers=[3, 4, 6, 3]),
     resnet50=dict(block=Bottleneck, layers=[3, 4, 6, 3]),
