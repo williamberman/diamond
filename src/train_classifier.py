@@ -40,6 +40,7 @@ def main():
     args.add_argument("--validation_subset_n", type=int, default=None)
     args.add_argument("--wandb_name", type=str, default=None)
     args.add_argument("--model", type=str, required=True, choices=resnet_configs.keys())
+    args.add_argument("--lr", type=float, default=1e-4)
     args = args.parse_args()
 
     if args.no_wandb:
@@ -56,7 +57,7 @@ def main():
     ).train().requires_grad_(True).to(device)
     model = DDP(model, device_ids=[device])
 
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 
     dataloader = iter(DataLoader(TrainingDataset(), batch_size=args.batch_size, num_workers=8))
 
