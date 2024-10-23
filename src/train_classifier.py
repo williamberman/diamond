@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 import torch.optim as optim
+from torch.optim.lr_scheduler import LambdaLR
 import wandb
 import tqdm
 import numpy as np
@@ -21,6 +22,10 @@ class dummy_wandb:
     def init(*args, **kwargs): pass
 
 device = int(os.environ['LOCAL_RANK'])
+torch.cuda.set_device(device)
+
+print(f"device: {device}")
+print(f"CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
 
 def main():
     global args, model, training_set_idx, validation_set_idx, wandb
@@ -28,38 +33,60 @@ def main():
     dist.init_process_group(backend='nccl')
 
     args = ArgumentParser()
-    args.add_argument('--num_classes', type=int, required=False)
-    args.add_argument('--num_input_images', type=int, default=30)
+
+    args.add_argument("--model_type", type=str, required=True, choices=resnet_configs.keys())
+    args.add_argument('--model_num_classes', type=int, required=True)
+    args.add_argument('--model_num_input_images', type=int, required=True)
+    args.add_argument("--model_lr", type=float, required=True)
+    args.add_argument("--model_batch_size", type=int, required=True)
+
     args.add_argument("--dataset_path", type=str, required=True)
-    args.add_argument("--batch_size", type=int, default=512)
-    args.add_argument("--validation_batch_size", type=int, default=1024)
-    args.add_argument("--validation_steps", type=int, default=1000)
-    args.add_argument("--save_steps", type=int, default=1000)
+    args.add_argument("--dataset_train_split_n_examples", type=int, required=True)
+    args.add_argument("--dataset_buffer_size_gb", type=int, required=True)
+    args.add_argument("--dataset_fill_buffer_thread_count", type=int, required=True)
+
+    args.add_argument("--validation_n_examples", type=int, required=True)
+    args.add_argument("--validation_batch_size", type=int, required=True)
+    args.add_argument("--validation_steps", type=int, required=False, default=None)
+    args.add_argument("--validation_epochs", type=int, required=False, default=None)
+
+    args.add_argument("--save_steps", type=int, required=False, default=None)
+    args.add_argument("--save_epochs", type=int, required=False, default=None)
     args.add_argument("--save_dir", type=str, required=True)
-    args.add_argument("--train_n_examples", type=int, required=True)
-    args.add_argument("--no_wandb", action="store_true")
-    args.add_argument("--validation_subset_n", type=int, default=None)
-    args.add_argument("--wandb_name", type=str, default=None)
-    args.add_argument("--model", type=str, required=True, choices=resnet_configs.keys())
-    args.add_argument("--lr", type=float, default=1e-4)
-    args.add_argument("--training_data_buffer_size_gb", type=int, required=True)
-    args.add_argument("--training_data_buffer_thread_count", type=int, required=True)
+
+    args.add_argument("--wandb_name", type=str, required=False, default=None)
+    args.add_argument("--wandb_disable", action="store_true")
+
     args = args.parse_args()
 
-    if args.no_wandb:
+    assert args.wandb_disable or args.wandb_name is not None
+    assert args.validation_steps is None or args.validation_epochs is None
+    assert args.save_steps is None or args.save_epochs is None
+
+    if args.wandb_disable:
         wandb = dummy_wandb()
 
     training_set_idx, validation_set_idx = get_data_splits()
 
+    if args.validation_steps is None:
+        args.validation_steps = args.dataset_train_split_n_examples // args.validation_batch_size * args.validation_epochs
+        print(f"validation_epochs: {args.validation_epochs} validation_steps: {args.validation_steps}")
+
+    if args.save_steps is None:
+        args.save_steps = args.dataset_train_split_n_examples // args.model_batch_size * args.save_epochs
+        print(f"save_epochs: {args.save_epochs} save_steps: {args.save_steps}")
+
     model = ResNet(
-        **resnet_configs[args.model],
-        num_classes=args.num_classes,
-        input_channels=3*args.num_input_images,
-        norm_layer=lambda x: AdaLN(x, args.num_input_images*3-1),
+        **resnet_configs[args.model_type],
+        num_classes=args.model_num_classes,
+        input_channels=3*args.model_num_input_images,
+        norm_layer=lambda x: AdaLN(x, args.model_num_input_images*3-1),
     ).train().requires_grad_(True).to(device)
     model = DDP(model, device_ids=[device])
 
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = optim.AdamW(model.parameters(), lr=args.model_lr)
+
+    lr_scheduler = LambdaLR(optimizer, lambda step: 1)
 
     dataloader = iter(DataLoader(TrainingDataset(), batch_size=1, num_workers=0, collate_fn=lambda x: x[0]))
 
@@ -82,12 +109,13 @@ def main():
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         optimizer.zero_grad()
+        lr_scheduler.step()
 
         dist.barrier()
 
         if device == 0 and (step+1) % args.save_steps == 0:
             print(f"saving model at step {step}")
-            state_dict = dict(model=model.state_dict(), optimizer=optimizer.state_dict())
+            state_dict = dict(model=model.state_dict(), optimizer=optimizer.state_dict(), lr_scheduler=lr_scheduler.state_dict())
             os.makedirs(args.save_dir, exist_ok=True)
             torch.save(state_dict, os.path.join(args.save_dir, f"{step+1}.pt"))
             print(f"done saving model at step {step}")
@@ -98,7 +126,7 @@ def main():
         done = [False]
 
         if (step+1) % args.validation_steps == 0:
-            validation_data = validation(subset_n=args.validation_subset_n)
+            validation_data = validation(n_examples=args.validation_n_examples)
             if device == 0 and ('validation_loss/avg_prev' in validation_data or 'validation_loss/avg_cur' in validation_data):
                 # stop training if we have not improved validation loss by at least .01
                 done = [validation_data['validation_loss/avg_prev'] - 0.01 <= validation_data['validation_loss/avg_cur']]
@@ -106,7 +134,7 @@ def main():
         if device == 0:
             log_args = dict(loss=loss.item(), grad_norm=grad_norm.item(), step_time=time.perf_counter() - t0, **validation_data)
             wandb.log(log_args, step=step)
-            print(f"{step}: {log_args}")
+            print(f"{args.model_type} {args.dataset_train_split_n_examples} {step}: {log_args}")
 
         step += 1
 
@@ -114,9 +142,9 @@ def main():
         if done[0]:
             break
 
-    validation_data = validation(subset_n=None)
+    validation_data = validation(n_examples=None)
     if device == 0:
-        print(f"final validation data: {validation_data}")
+        print(f"{args.model_type} {args.dataset_train_split_n_examples} final validation data: {validation_data}")
         wandb.log(validation_data, step=step)
 
 def get_data_splits():
@@ -136,10 +164,10 @@ def get_data_splits():
 
         total_seen = sum([x['end_idx'] - x['start_idx'] for x in training_set_idx.values()])
 
-        if total_seen + n_obs < args.train_n_examples:
+        if total_seen + n_obs < args.dataset_train_split_n_examples:
             training_set_idx[shard_n] = dict(start_idx=0, end_idx=n_obs)
         else:
-            n_to_add_to_training_set = max(args.train_n_examples - total_seen, 0)
+            n_to_add_to_training_set = max(args.dataset_train_split_n_examples - total_seen, 0)
             if n_to_add_to_training_set > 0:
                 training_set_idx[shard_n] = dict(start_idx=0, end_idx=n_to_add_to_training_set)
             if n_obs - n_to_add_to_training_set > 0:
@@ -150,24 +178,24 @@ def get_data_splits():
 
     print(f"n_examples_in_training_set: {n_examples_in_training_set} n_examples_in_validation_set: {n_examples_in_validation_set}")
 
-    assert n_examples_in_training_set == args.train_n_examples
+    assert n_examples_in_training_set == args.dataset_train_split_n_examples
 
     return training_set_idx, validation_set_idx
 
 class TrainingDataset(IterableDataset):
     def __iter__(self):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.training_data_buffer_thread_count) as thread_pool:
-            obs_max_size_bytes = args.training_data_buffer_size_gb * 1024 * 1024 * 1024
-            bytes_per_obs = 3*args.num_input_images * 64 * 64 * 4
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.dataset_fill_buffer_thread_count) as thread_pool:
+            obs_max_size_bytes = args.dataset_buffer_size_gb * 1024 * 1024 * 1024
+            bytes_per_obs = 3*args.model_num_input_images * 64 * 64 * 4
 
             max_n_obs = obs_max_size_bytes // bytes_per_obs // 2
 
-            obs1 = np.zeros((max_n_obs, 3*args.num_input_images, 64, 64), dtype=np.float32)
-            cond1 = np.zeros((max_n_obs, 3*args.num_input_images-1), dtype=np.float32)
+            obs1 = np.zeros((max_n_obs, 3*args.model_num_input_images, 64, 64), dtype=np.float32)
+            cond1 = np.zeros((max_n_obs, 3*args.model_num_input_images-1), dtype=np.float32)
             target1 = np.zeros((max_n_obs), dtype=np.int64)
 
-            obs2 = np.zeros((max_n_obs, 3*args.num_input_images, 64, 64), dtype=np.float32)
-            cond2 = np.zeros((max_n_obs, 3*args.num_input_images-1), dtype=np.float32)
+            obs2 = np.zeros((max_n_obs, 3*args.model_num_input_images, 64, 64), dtype=np.float32)
+            cond2 = np.zeros((max_n_obs, 3*args.model_num_input_images-1), dtype=np.float32)
             target2 = np.zeros((max_n_obs), dtype=np.int64)
 
             def mmap_shard(shard_idx):
@@ -231,12 +259,12 @@ class TrainingDataset(IterableDataset):
             idx = 0
 
             while True:
-                if idx + args.batch_size > obs.shape[0]:
+                if idx + args.model_batch_size > obs.shape[0]:
                     obs_ = obs[idx:]
                     cond_ = cond[idx:]
                     target_ = target[idx:]
 
-                    remaining = args.batch_size - obs_.shape[0]
+                    remaining = args.model_batch_size - obs_.shape[0]
 
                     next_fill_future = thread_pool.submit(fill_training_buffer, obs, cond, target, pbar_disable=True)
                     obs, cond, target = fill_future.result()
@@ -248,14 +276,14 @@ class TrainingDataset(IterableDataset):
 
                     idx = remaining
                 else:
-                    obs_ = obs[idx:idx + args.batch_size]
-                    cond_ = cond[idx:idx + args.batch_size]
-                    target_ = target[idx:idx + args.batch_size]
-                    idx += args.batch_size
+                    obs_ = obs[idx:idx + args.model_batch_size]
+                    cond_ = cond[idx:idx + args.model_batch_size]
+                    target_ = target[idx:idx + args.model_batch_size]
+                    idx += args.model_batch_size
 
-                assert obs_.shape[0] == args.batch_size
-                assert cond_.shape[0] == args.batch_size
-                assert target_.shape[0] == args.batch_size
+                assert obs_.shape[0] == args.model_batch_size
+                assert cond_.shape[0] == args.model_batch_size
+                assert target_.shape[0] == args.model_batch_size
 
                 yield dict(
                     obs=torch.tensor(obs_),
@@ -266,12 +294,12 @@ class TrainingDataset(IterableDataset):
 all_validation_data = []
 
 @torch.no_grad()
-def validation(subset_n=None):
+def validation(n_examples=None):
     dist.barrier()
 
     validation_data = None
 
-    pbar = tqdm.tqdm(total=subset_n)
+    pbar = tqdm.tqdm(total=n_examples)
 
     if device == 0:
         print("running validation")
@@ -280,8 +308,8 @@ def validation(subset_n=None):
         correct = 0
         total = 0
 
-        correct_classes = {i: 0 for i in range(args.num_classes)}
-        total_classes = {i: 0 for i in range(args.num_classes)}
+        correct_classes = {i: 0 for i in range(args.model_num_classes)}
+        total_classes = {i: 0 for i in range(args.model_num_classes)}
 
         validation_model = model.module
         validation_model.eval().requires_grad_(False)
@@ -304,7 +332,7 @@ def validation(subset_n=None):
                 total += target.shape[0]
                 correct += (pred.argmax(dim=1) == target).sum().item()
 
-                for i in range(args.num_classes):
+                for i in range(args.model_num_classes):
                     mask = target == i
                     pred_ = pred[mask]
                     target_ = target[mask]
@@ -314,10 +342,10 @@ def validation(subset_n=None):
 
                 pbar.update(target.shape[0])
 
-                if subset_n is not None and total >= subset_n:
+                if n_examples is not None and total >= n_examples:
                     break
 
-            if subset_n is not None and total >= subset_n:
+            if n_examples is not None and total >= n_examples:
                 break
 
         validation_loss = sum(validation_loss) / len(validation_loss)
@@ -330,7 +358,7 @@ def validation(subset_n=None):
             "correct/total": correct,
         }
 
-        for i in range(args.num_classes):
+        for i in range(args.model_num_classes):
             validation_data[f"accuracy/{i}"] = correct_classes[i] / total_classes[i]
             validation_data[f"total/{i}"] = total_classes[i]
             validation_data[f"correct/{i}"] = correct_classes[i]
